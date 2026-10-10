@@ -198,6 +198,7 @@ from mcp.server.fastmcp import FastMCP
 
 # === 配置 ===
 PETHOSPITAL_API_URL = os.getenv("PETHOSPITAL_API_URL", "http://127.0.0.1:8080")
+MCP_HOST = os.getenv("MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.getenv("MCP_PORT", "8081"))
 MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "streamable-http")  # "streamable-http" or "stdio"
 
@@ -343,7 +344,7 @@ if __name__ == "__main__":
         # Streamable HTTP 模式：用于远程 MCP Client
         mcp.run(
             transport="streamable-http",
-            host="0.0.0.0",
+            host=MCP_HOST,
             port=MCP_PORT,
             path="/mcp",
         )

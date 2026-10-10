@@ -39,6 +39,7 @@ python -m venv .venv
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `PETHOSPITAL_API_URL` | `http://127.0.0.1:8080` | 宠物医院 REST API 地址 |
+| `MCP_HOST` | `127.0.0.1` | MCP 服务监听地址（仅本机，勿改为 `0.0.0.0`） |
 | `MCP_PORT` | `8081` | MCP 服务端口 |
 | `MCP_TRANSPORT` | `streamable-http` | 传输方式 |
 

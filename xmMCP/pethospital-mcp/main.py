@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 
 # === 配置 ===
 PETHOSPITAL_API_URL = os.getenv("PETHOSPITAL_API_URL", "http://127.0.0.1:8080")
+MCP_HOST = os.getenv("MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.getenv("MCP_PORT", "8081"))
 MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "streamable-http")
 PET_HOSPITAL_EXE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pethospital.exe")
@@ -204,7 +205,7 @@ async def create_pet_handler(
 mcp = FastMCP(
     "pet-hospital",
     instructions="宠物医院管理系统 MCP Server，提供宠物档案查询和新增服务。",
-    host="0.0.0.0",
+    host=MCP_HOST,
     port=MCP_PORT,
     streamable_http_path="/mcp",
     stateless_http=True,
