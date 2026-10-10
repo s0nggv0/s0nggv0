@@ -15,7 +15,7 @@ MCP Server（协议版本 **2026-07-28**，Streamable HTTP）将本机 AnythingL
 随服务器一并提供 `upload.html`：浏览器打开即可把本地文档上传到 AnythingLLM 工作区并自动向量化（`POST /api/v1/document/upload` + 轮询等待嵌入完成），之后即可通过 `workspace_chat` 基于这些文档提问。
 
 - 直接双击或在浏览器打开 `upload.html` 即可使用。
-- 页面内置 API 地址 `http://localhost:3001/api` 与 API key（与 `.env` 保持一致）；上传前请确保 AnythingLLM 正在运行。
+- 页面顶部填写 API 地址与 API Key（点击「保存并连接」后存入浏览器 `localStorage`），默认地址 `http://localhost:3001/api`；上传前请确保 AnythingLLM 正在运行。
 
 ## 快速开始
 
@@ -71,4 +71,4 @@ Copy-Item .env.example .env   # 填入 ANYTHINGLLM_API_KEY
 ## 安全说明
 
 - 仅绑定 `127.0.0.1`，请不要对外网开放。
-- API key 只放在 `.env`（该文件已被 `.gitignore` 建议排除），不要提交到仓库。
+- API key 只放在 `.env`（该文件已由 `.gitignore` 排除），不要提交到仓库。

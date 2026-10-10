@@ -1,0 +1,23 @@
+# IDE
+.idea/
+
+# 本地工具配置（含本机端点信息）
+opencode.json
+
+# AnythingLLM 桌面应用（体积过大，不纳入版本控制）
+xmMCP/anythingllm/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# 环境变量与密钥
+.env
+
+# 日志
+*.log
+
+# 二进制与数据文件
+*.exe
+*.db

@@ -35,7 +35,7 @@ agent/
 
 - 上传本地文档到当前工作区并自动向量化
 - 工作区管理：刷新 / 新建 / 删除，查看工作区文档列表
-- 页面内置 API 地址 `http://localhost:3001/api`
+- 顶部输入 API 地址与 Key，点击「保存并连接」后生效；配置存于浏览器 `localStorage`，默认地址 `http://localhost:3001/api`
 
 ## xmMCP/pethospital-mcp
 
@@ -60,7 +60,7 @@ agent/
 
 ## agent/Practice01
 
-极简命令行问答工具 `chat.py`，通过 OpenAI 兼容的 Chat Completions 接口做单轮流式问答。
+极简命令行问答工具 `chat.py`，通过 OpenAI 兼容的 Chat Completions 接口做多轮流式问答（对话记录仅存内存，重启后清空）。
 
 ```bash
 pip install openai
