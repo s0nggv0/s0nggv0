@@ -12,7 +12,8 @@ xmMCP/
 └── pethospital-mcp/     宠物医院 MCP 服务（Python）
 
 agent/
-└── Practice01/          命令行问答小工具（OpenAI 兼容接口）
+├── Practice01/          命令行问答小工具（OpenAI 兼容接口）
+└── Practice02/          Function Call 工具调用示例（日期、闰年、文件操作）
 ```
 
 ## xmMCP/anythingllm-mcp
@@ -68,6 +69,27 @@ python chat.py
 ```
 
 配置从同目录 `config.ini` 读取（`base_rul` / `mode_name` / `key`）。该文件含 API Key，已由 `.gitignore` 排除，需自行创建。
+
+## agent/Practice02
+
+基于 OpenAI SDK 的命令行聊天程序，演示 **Function Call**：让模型调用本地 Python 函数并基于结果作答。
+
+| 脚本 | 工具数 | 说明 |
+| --- | --- | --- |
+| `chat.py` | 1 | 基础版，`getDate` 获取当前日期时间 |
+| `chat_leap.py` | 2 | 新增 `isLeapYear` 判断闰年 |
+| `chat_file.py` | 12 | 完整版：日期、闰年、当前目录，以及文件 / 目录的列、读、建、删、改、重命名 |
+
+```bash
+pip install openai
+python chat_file.py
+```
+
+- 配置从同目录 `config.ini` 读取（`base_url` / `model_name` / `key`），已由 `.gitignore` 排除，需自行创建
+- `getDate` 通过调用系统 `date` / `time` 命令实现，**仅 Windows 可用**；其余文件类工具跨平台
+- `chat_file_architecture.mmd` 为 `chat_file.py` 的 Mermaid 架构图
+
+> 注意：`chat_file.py` 的文件工具会真实增删改本地文件，请勿在重要目录中随意运行。
 
 ## 安全说明
 
