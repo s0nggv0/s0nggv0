@@ -13,7 +13,8 @@ xmMCP/
 
 agent/
 ├── Practice01/          命令行问答小工具（OpenAI 兼容接口）
-└── Practice02/          Function Call 工具调用示例（日期、闰年、文件操作）
+├── Practice02/          Function Call 工具调用示例（日期、闰年、文件操作）
+└── FAgent/              分层架构的 Function Call 智能助手（core + tui）
 ```
 
 ## xmMCP/anythingllm-mcp
@@ -90,6 +91,24 @@ python chat_file.py
 - `chat_file_architecture.mmd` 为 `chat_file.py` 的 Mermaid 架构图
 
 > 注意：`chat_file.py` 的文件工具会真实增删改本地文件，请勿在重要目录中随意运行。
+
+## agent/FAgent
+
+在 Practice02 基础上重构的 Function Call 智能助手，采用 **`core` + `tui`** 两层架构，业务逻辑与界面完全隔离。
+
+```bash
+pip install openai textual
+
+python main.py                 # 默认 Textual TUI
+python main.py --ui console    # 命令行界面
+```
+
+- `core/`：配置解析、会话与工具调用循环、12 个工具（`@tool` 装饰器注册，新增工具无需改分发代码）
+- `tui/`：`ChatView` 契约 + `ChatPresenter` 共享控制器，内置 Textual TUI 与命令行两种界面，可按同一契约扩展新界面
+- 配置同样从 `config.ini` 读取（`base_url` / `model_name` / `key`），已被 `.gitignore` 排除
+- 能力与 Practice02 的 `chat_file.py` 相当：日期、闰年、当前目录，以及文件 / 目录增删改查，含安全护栏
+- `getDate` **仅 Windows 可用**；其余工具跨平台
+- 详细说明见 `agent/FAgent/README.md`
 
 ## 安全说明
 
