@@ -6,9 +6,6 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.ini")
 
-# 单次提问内允许的最大工具调用轮次，防止模型反复请求工具导致死循环
-MAX_TOOL_ROUNDS = 5
-
 
 def load_config(path):
     cfg = {}
@@ -95,7 +92,7 @@ def main():
 
         client = OpenAI(base_url=cfg["base_url"], api_key=cfg["key"])
 
-        for _ in range(MAX_TOOL_ROUNDS):
+        while True:
             response = client.chat.completions.create(
                 model=cfg["model_name"],
                 messages=history,
@@ -125,8 +122,6 @@ def main():
                         "content": tool_result,
                     }
                 )
-        else:
-            print("提示：工具调用轮次达到上限，已停止。")
 
 
 if __name__ == "__main__":
