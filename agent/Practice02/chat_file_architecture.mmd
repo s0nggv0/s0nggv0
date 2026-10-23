@@ -1,0 +1,160 @@
+%% ============================================================
+%% chat_file.py 代码架构图（Mermaid flowchart）
+%% 描述：基于 OpenAI SDK 的命令行聊天助手 + Function Call 工具调度
+%% 渲染：VS Code（Markdown Preview Mermaid / Mermaid Preview）
+%%      或 https://mermaid.live
+%% ============================================================
+flowchart TB
+
+    %% ---------------- ① 入口层 ----------------
+    subgraph ENTRY["① 入口层 · main()"]
+        direction TB
+        A0["if __name__ == '__main__'<br/>main()"] --> A1{"CONFIG_PATH 是否存在？<br/>（脚本同目录 config.ini）"}
+        A1 -- 否 --> A1E["print 错误 → sys.exit(1)"]
+        A1 -- 是 --> A2["load_config(CONFIG_PATH)<br/>逐行解析 key=value，跳过 # 注释"]
+        A2 --> A3{"base_url / model_name / key<br/>字段齐全？"}
+        A3 -- 否 --> A3E["print 缺少字段 → sys.exit(1)"]
+        A3 -- 是 --> A4["打印工具清单提示<br/>history = []"]
+        A4 --> A5["prompt = input('我：')<br/>（EOFError / KeyboardInterrupt 退出）"]
+        A5 --> A6["history.append({role: user, content: prompt})"]
+    end
+
+    %% ---------------- ② 配置层 ----------------
+    subgraph CONFIG["② 配置层"]
+        CFG[("config.ini<br/>base_url<br/>model_name<br/>key")]
+    end
+
+    %% ---------------- ③ 模型交互层 ----------------
+    subgraph LLM["③ 模型交互层 · 内层 ReAct 循环"]
+        direction TB
+        C1["client = OpenAI(base_url=cfg.base_url,<br/>api_key=cfg.key)"]
+        C2["client.chat.completions.create(<br/>model=cfg.model_name,<br/>messages=history,<br/>tools=TOOLS,<br/>tool_choice='auto',<br/>stream=False)"]
+        C3{"message.tool_calls ?"}
+        C4["history.append(message.model_dump(exclude_none=True))"]
+        C5["reply = message.content or ''<br/>print(reply)<br/>history.append({role: assistant})"]
+        C1 --> C2 --> C3
+        C3 -- "是（需要调工具）" --> C4
+        C3 -- "否（给出最终回答）" --> C5
+    end
+
+    %% ---------------- ④ 工具注册层 ----------------
+    subgraph REG["④ 工具注册层 · TOOLS"]
+        TOOLS["TOOLS：OpenAI Function Schema 列表（12 个工具）<br/>name / description / parameters(JSON Schema)"]
+    end
+
+    %% ---------------- ⑤ 分发层 ----------------
+    subgraph DISPATCH["⑤ 参数解析与分发层"]
+        direction TB
+        D1["for tool_call in message.tool_calls"]
+        D2["json.loads(tool_call.function.arguments or '{}')"]
+        D3{"JSON 合法且为 dict ?"}
+        D4["tool_result = 'Error: 参数不是合法 JSON / 必须是 JSON 对象'"]
+        D5["run_tool(name, args)<br/>handlers 字典按工具名查表派发"]
+        D6["try / except 统一兜底<br/>异常转成 'Error: 工具 x 执行失败'"]
+        D7["history.append({role: tool,<br/>tool_call_id, content: tool_result})<br/>print(tool_result)"]
+        D1 --> D2 --> D3
+        D3 -- 否 --> D4 --> D7
+        D3 -- 是 --> D5 --> D6 --> D7
+        D5 -.未知工具名.-> D8["'Error: unknown tool name'"]
+        D8 --> D7
+    end
+
+    %% ---------------- ⑥ 工具实现层 ----------------
+    subgraph IMPL["⑥ 工具实现层（12 个本地函数）"]
+        direction TB
+        subgraph IMPL_SYS["系统 / 环境类"]
+            T1["getDate()<br/>读取系统日期时间"]
+            T2["isLeapYear(year)<br/>纯 Python 闰年判断"]
+            T3["getCwd()<br/>返回工作目录"]
+        end
+        subgraph IMPL_QUERY["查询 / 读取类"]
+            T4["listDirectory(path, recursive)<br/>排序输出，MAX_LIST_ENTRIES=500 截断"]
+            T5["getFileType(path)<br/>目录 / 文本 / 二进制 + MIME + 扩展名"]
+            T6["readFile(path, max_chars)<br/>DEFAULT_MAX_CHARS=20000 截断"]
+        end
+        subgraph IMPL_WRITE["创建 / 修改类"]
+            T7["createFile(directory, filename, content)<br/>自动建多级目录，已存在不覆盖"]
+            T8["editFile(path, content, mode)<br/>overwrite / append"]
+            T9["createDirectory(path)<br/>等价 makedirs(exist_ok=True)"]
+        end
+        subgraph IMPL_DEL["删除 / 移动类（含安全护栏）"]
+            T10["deleteDirectory(path)<br/>拒绝删盘符根目录、cwd 及其上级"]
+            T11["deleteFile(path)"]
+            T12["renamePath(src, dst)<br/>目标不可已存在，自动建父目录"]
+        end
+    end
+
+    %% ---------------- ⑦ 辅助函数层 ----------------
+    subgraph HELPER["⑦ 公共辅助函数"]
+        direction TB
+        H1["_resolve(path)<br/>expanduser + abspath 统一绝对路径"]
+        H2["_is_text_file(path)<br/>含 NUL 判二进制，UTF-8/GBK 可解码判文本"]
+        H3["_detect_encoding(path)<br/>返回 utf-8 / gbk"]
+        H4["_decode(raw)<br/>命令输出按 UTF-8 → GBK 依次解码"]
+        H5["load_config(path)<br/>解析 config.ini"]
+    end
+
+    %% ---------------- ⑧ 系统与文件系统层 ----------------
+    subgraph SYS["⑧ 系统 / 标准库依赖"]
+        direction TB
+        S1["subprocess.run(['cmd','/c','date /t && time /t'])<br/>timeout=5（Windows）"]
+        S2["os / os.path：walk, listdir, makedirs,<br/>remove, rename, getsize, getcwd"]
+        S3["shutil.rmtree<br/>删除非空目录"]
+        S4["mimetypes.guess_type<br/>MIME 推断"]
+        S5["openai.OpenAI<br/>模型调用"]
+        S6["json / sys"]
+    end
+
+    %% ================= 主流程连接 =================
+    A6 --> C1
+    CFG -.->|"读取"| A2
+    H5 -.-> A2
+    TOOLS -.->|"随请求发送"| C2
+    C4 --> D1
+    D7 -->|"带回工具结果，继续下一轮推理"| C2
+    C5 -->|"回答完毕，等待下一个问题"| A5
+
+    %% 分发 → 工具实现
+    D5 --> T1 & T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10 & T11 & T12
+
+    %% 工具实现 → 辅助函数 → 系统库
+    T1 --> H4
+    T4 --> H1
+    T5 --> H1 & H2
+    T6 --> H1 & H2 & H3
+    T7 --> H1
+    T8 --> H1 & H2 & H3
+    T9 --> H1
+    T10 --> H1
+    T11 --> H1
+    T12 --> H1
+
+    H4 --> S1
+    H1 --> S2
+    T4 --> S2
+    T5 --> S4
+    T10 --> S3
+    T12 --> S2
+    C1 --> S5
+    D2 --> S6
+
+    %% ================= 样式 =================
+    classDef entry fill:#e3f2fd,stroke:#1565c0,stroke-width:1.5px,color:#0d47a1
+    classDef config fill:#fff8e1,stroke:#f9a825,stroke-width:1.5px,color:#795548
+    classDef llm fill:#ede7f6,stroke:#5e35b1,stroke-width:1.5px,color:#311b92
+    classDef reg fill:#e8f5e9,stroke:#2e7d32,stroke-width:1.5px,color:#1b5e20
+    classDef dispatch fill:#fce4ec,stroke:#ad1457,stroke-width:1.5px,color:#880e4f
+    classDef impl fill:#e0f7fa,stroke:#00838f,stroke-width:1.5px,color:#006064
+    classDef helper fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1.2px,color:#4a148c
+    classDef sys fill:#eceff1,stroke:#455a64,stroke-width:1.2px,color:#263238
+    classDef err fill:#ffebee,stroke:#c62828,stroke-width:1.2px,color:#b71c1c
+
+    class A0,A1,A2,A3,A4,A5,A6,A1E,A3E entry
+    class CFG config
+    class C1,C2,C3,C4,C5 llm
+    class TOOLS reg
+    class D1,D2,D3,D5,D6,D7 dispatch
+    class T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12 impl
+    class H1,H2,H3,H4,H5 helper
+    class S1,S2,S3,S4,S5,S6 sys
+    class D4,D8 err
