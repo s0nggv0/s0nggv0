@@ -8,6 +8,7 @@ class ConsoleUI(ChatView):
         self._input = input_func
         self._output = output_func
         self._presenter = ChatPresenter(agent, self)
+        self._buffer = []
 
     def run(self):
         self._presenter.start()
@@ -36,11 +37,22 @@ class ConsoleUI(ChatView):
     def show_user_message(self, text):
         pass
 
+    def show_tool_start(self, name, args):
+        self._output(f"调用工具 {name}…")
+
     def show_tool_result(self, name, args, result):
         self._output(result)
 
-    def show_answer(self, text):
-        self._output(text)
+    def begin_answer(self):
+        self._buffer = []
+
+    def show_token(self, text):
+        self._buffer.append(text)
+
+    def end_answer(self):
+        text = "".join(self._buffer)
+        if text:
+            self._output(text)
 
     def show_error(self, text):
         self._output(f"错误：{text}")

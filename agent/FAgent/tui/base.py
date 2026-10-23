@@ -9,6 +9,8 @@ ChatPresenter 负责调用 core.Agent，并把结果翻译成 ChatView 调用。
 3. 无需修改 core 与 ChatPresenter。
 """
 
+import threading
+
 
 class ChatView:
     """界面渲染契约，所有方法都可能在后台线程中被调用。
@@ -24,12 +26,24 @@ class ChatView:
         """展示用户消息"""
         raise NotImplementedError
 
+    def show_tool_start(self, name, args):
+        """工具开始执行（展示执行状态）"""
+        raise NotImplementedError
+
     def show_tool_result(self, name, args, result):
         """展示一次工具调用及其结果"""
         raise NotImplementedError
 
-    def show_answer(self, text):
-        """展示模型最终回答"""
+    def begin_answer(self):
+        """准备接收一条助手回答（流式输出开始）"""
+        raise NotImplementedError
+
+    def show_token(self, text):
+        """收到一段回答增量文本"""
+        raise NotImplementedError
+
+    def end_answer(self):
+        """回答输出结束（用于收尾渲染）"""
         raise NotImplementedError
 
     def show_error(self, text):
@@ -52,10 +66,18 @@ class ChatPresenter:
         self.agent = agent
         self.view = view
         self._busy = False
+        self._cancel_event = threading.Event()
 
     @property
     def busy(self):
         return self._busy
+
+    def cancel(self):
+        """请求中止当前回答，返回是否确实有请求在进行"""
+        if not self._busy:
+            return False
+        self._cancel_event.set()
+        return True
 
     def start(self):
         self.view.show_welcome(self.agent.tool_names)
@@ -70,11 +92,21 @@ class ChatPresenter:
             return
 
         self._busy = True
+        self._cancel_event.clear()
         self.view.set_busy(True)
         try:
             self.view.show_user_message(text)
-            reply = self.agent.send(text, on_tool_result=self.view.show_tool_result)
-            self.view.show_answer(reply)
+            self.view.begin_answer()
+            try:
+                self.agent.send(
+                    text,
+                    on_token=self.view.show_token,
+                    on_tool_start=self.view.show_tool_start,
+                    on_tool_result=self.view.show_tool_result,
+                    is_cancelled=self._cancel_event.is_set,
+                )
+            finally:
+                self.view.end_answer()
         except Exception as e:
             self.view.show_error(f"请求失败：{e}")
         finally:
