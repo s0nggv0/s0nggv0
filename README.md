@@ -103,11 +103,11 @@ python main.py                 # 默认 Textual TUI
 python main.py --ui console    # 命令行界面
 ```
 
-- `core/`：配置解析、会话与工具调用循环、12 个工具（`@tool` 装饰器注册，新增工具无需改分发代码）
+- `core/`：配置解析、会话与工具调用循环、14 个工具（`@tool` 装饰器注册，新增工具无需改分发代码）
 - `tui/`：`ChatView` 契约 + `ChatPresenter` 共享控制器，内置 Textual TUI 与命令行两种界面，可按同一契约扩展新界面
-- 配置同样从 `config.ini` 读取（`base_url` / `model_name` / `key`），已被 `.gitignore` 排除
-- 能力与 Practice02 的 `chat_file.py` 相当：日期、闰年、当前目录，以及文件 / 目录增删改查，含安全护栏
-- `getDate` **仅 Windows 可用**；其余工具跨平台
+- 配置同样从 `config.ini` 读取（`base_url` / `model_name` / `key`，联网搜索另需 `[search]` 小节的 `baidu_api_key`），已被 `.gitignore` 排除
+- 能力：日期、闰年、当前目录，文件 / 目录增删改查，以及联网搜索与网页正文抓取
+- `getDate` **仅 Windows 可用**；`fetchWeb` 依赖系统 `curl` 与 `trafilatura`；其余工具跨平台
 - 详细说明见 `agent/FAgent/README.md`
 
 ## 安全说明

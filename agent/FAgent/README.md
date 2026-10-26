@@ -19,7 +19,8 @@ FAgent/
 │       ├── registry.py      # @tool 注册、参数校验、异常兜底、统一分发
 │       ├── common.py        # 路径解析、编码探测、文本文件判定
 │       ├── system.py        # getDate / isLeapYear / getCwd
-│       └── filesystem.py    # 目录与文件的增删改查
+│       ├── filesystem.py    # 目录与文件的增删改查
+│       └── web.py           # searchWeb：联网搜索；fetchWeb：抓取网页正文
 └── tui/                     # 展示层：交互与渲染
     ├── __init__.py
     ├── base.py              # ChatView 契约 + ChatPresenter 共享控制器
@@ -46,13 +47,14 @@ main.py  ──>  core
 ## 环境要求
 
 - Python 3.9 及以上
-- 依赖：`openai`、`textual`（TUI 使用，Rich 随其安装）
-- `getDate` 工具依赖 Windows 的 `cmd /c date /t && time /t`，其他系统会返回 `Error`；其余工具跨平台可用
+- 依赖：`openai`、`textual`（TUI 使用，Rich 随其安装）、`trafilatura`（网页正文提取）
+- `getDate` 工具依赖 Windows 的 `cmd /c date /t && time /t`，其他系统会返回 `Error`
+- `fetchWeb` 依赖本地 `curl` 命令行程序（Windows 10+ 自带），需确保其在 `PATH` 中
 
 安装依赖：
 
 ```bash
-pip install openai textual
+pip install openai textual trafilatura
 ```
 
 ## 配置
@@ -63,10 +65,14 @@ pip install openai textual
 base_url=https://api.deepseek.com
 model_name=deepseek-flash
 key=你的API密钥
+
+[search]
+baidu_api_key=你的百度千帆API Key
 ```
 
-- 支持 `#` 开头的注释行与空行
+- 支持 `#` 开头的注释行、空行与 `[section]` 小节
 - `base_url`、`model_name`、`key` 任一缺失时，程序打印错误并以退出码 1 结束
+- `searchWeb` 使用 `[search]` 小节的 `baidu_api_key` 调用百度千帆搜索 API；缺失时工具会向模型返回明确的错误信息
 - `config.ini` 已被 `.gitignore` 忽略，请勿提交真实密钥
 
 ## 运行
@@ -87,7 +93,9 @@ python main.py --help
 | 操作 | 说明 |
 | --- | --- |
 | 输入问题后回车 | 发送消息，等待模型回答 |
-| `↑` / `↓` | 在输入框中回溯历史提问 |
+| `Shift+Enter` | 在输入框内换行（终端不支持时可改用 `Ctrl+J`） |
+| 直接粘贴 | 多行文本原样插入，输入框随内容自动增高（最多 8 行） |
+| `↑` / `↓` | 光标在首行 / 末行时回溯历史提问，多行文本内按行移动光标 |
 | `Esc` | 取消当前请求，保留已生成的片段 |
 | `/help` | 查看命令与快捷键 |
 | `/tools` | 查看全部工具及用途 |
@@ -103,7 +111,7 @@ python main.py --help
 工具执行时以单行消息显示 spinner 与参数，完成后显示耗时与可折叠结果，回答结束后自动转为 Markdown 渲染。
 配色使用内置的自定义深色主题（近黑背景 + 暖橙强调色），终端宽度不足时自动精简提示栏、字标与右侧栏。
 
-## 工具列表（共 12 个）
+## 工具列表（共 14 个）
 
 | 工具 | 参数 | 功能 |
 | --- | --- | --- |
@@ -119,6 +127,8 @@ python main.py --help
 | `deleteDirectory` | `path` | 递归删除目录，带安全护栏 |
 | `deleteFile` | `path` | 删除文件 |
 | `renamePath` | `src`、`dst` | 重命名/移动，目标不可已存在 |
+| `fetchWeb` | `url`、`max_chars=20000` | 用 curl 抓取网页，经 trafilatura 提取正文并转为 Markdown |
+| `searchWeb` | `query`、`top_k=10` | 调用百度千帆搜索 API，返回结果摘要与参考来源标题、URL |
 
 所有工具错误统一以 `Error: ...` 文本回传给模型，不会中断对话。
 
@@ -134,7 +144,7 @@ python main.py --help
 
 ### 新增工具
 
-在 `core/tools/system.py` 或 `core/tools/filesystem.py` 中添加带 `@tool` 装饰器的函数即可：
+在 `core/tools/` 下已有模块（`system.py`、`filesystem.py`、`web.py`）中添加带 `@tool` 装饰器的函数即可：
 
 ```python
 from .registry import tool

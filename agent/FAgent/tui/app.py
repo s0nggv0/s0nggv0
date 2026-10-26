@@ -8,8 +8,9 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.message import Message
 from textual.theme import Theme
-from textual.widgets import Collapsible, Input, Markdown, Static
+from textual.widgets import Collapsible, Markdown, Static, TextArea
 
 from .base import ChatPresenter, ChatView
 
@@ -241,10 +242,27 @@ class NoticeMessage(Static):
         super().__init__(content)
 
 
-class HistoryInput(Input):
-    """支持 ↑/↓ 回溯历史提问的单行输入框。"""
+class HistoryTextArea(TextArea):
+    """支持多行编辑与 ↑/↓ 历史回溯的输入框。
+
+    Enter 发送；Shift+Enter（终端不支持时用 Ctrl+J）插入换行；
+    直接粘贴多行文本会原样保留换行，输入框随内容自动增高。
+    """
+
+    MAX_LINES = 8
+
+    class Submitted(Message):
+        """用户按下 Enter 提交输入。"""
+
+        def __init__(self, text_area: "HistoryTextArea"):
+            self.text_area = text_area
+            self.value = text_area.text
+            super().__init__()
 
     def __init__(self, **kwargs):
+        kwargs.setdefault("compact", True)
+        kwargs.setdefault("show_line_numbers", False)
+        kwargs.setdefault("highlight_cursor_line", False)
         super().__init__(**kwargs)
         self._history = []
         self._index = None
@@ -258,31 +276,65 @@ class HistoryInput(Input):
         self._history.append(text)
         self._index = None
 
-    def on_key(self, event):
-        if event.key not in ("up", "down") or not self._history:
+    async def _on_key(self, event):
+        if event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.Submitted(self))
             return
-        event.prevent_default()
-        event.stop()
+        if event.key in ("shift+enter", "ctrl+j"):
+            event.prevent_default()
+            event.stop()
+            self.insert("\n")
+            return
+        await super()._on_key(event)
 
-        if event.key == "up":
+    def action_cursor_up(self, select=False):
+        # 光标已在首行时，↑ 改为回溯历史；多行内部仍按行移动
+        if not select and self.cursor_at_first_line and self._history_step(-1):
+            return
+        super().action_cursor_up(select)
+
+    def action_cursor_down(self, select=False):
+        # 光标已在末行时，↓ 改为前进历史
+        if not select and self.cursor_at_last_line and self._history_step(1):
+            return
+        super().action_cursor_down(select)
+
+    def on_text_area_changed(self, event):
+        self.sync_height()
+
+    def sync_height(self):
+        """按换行后的可视行数调整高度，超长时内部滚动。"""
+        lines = max(1, self.virtual_size.height)
+        height = min(lines, self.MAX_LINES)
+        if self.styles.height != height:
+            self.styles.height = height
+
+    def _history_step(self, direction):
+        if not self._history:
+            return False
+        if direction < 0:
             if self._index is None:
-                self._draft = self.value
+                self._draft = self.text
                 self._index = len(self._history) - 1
             elif self._index > 0:
                 self._index -= 1
             self._set_value(self._history[self._index])
-        elif self._index is None:
-            return
-        elif self._index < len(self._history) - 1:
-            self._index += 1
-            self._set_value(self._history[self._index])
         else:
-            self._index = None
-            self._set_value(self._draft)
+            if self._index is None:
+                return False
+            if self._index < len(self._history) - 1:
+                self._index += 1
+                self._set_value(self._history[self._index])
+            else:
+                self._index = None
+                self._set_value(self._draft)
+        return True
 
     def _set_value(self, text):
-        self.value = text
-        self.cursor_position = len(text)
+        self.text = text
+        self.cursor_location = self.document.end
 
 
 class FAgentApp(App, ChatView):
@@ -496,19 +548,20 @@ class FAgentApp(App, ChatView):
     }
 
     #input-bar {
-        height: 3;
+        height: auto;
+        min-height: 3;
         margin: 0 2;
         padding: 0 1;
         border: round $panel;
         background: $surface;
     }
-    #input-bar.focused {
+    #input-bar:focus-within {
         border: round $primary;
     }
     #prompt {
         width: 2;
         height: 1;
-        content-align: left middle;
+        content-align: left top;
         color: $primary;
         text-style: bold;
     }
@@ -518,10 +571,14 @@ class FAgentApp(App, ChatView):
         padding: 0;
         border: none;
         background: transparent;
+        scrollbar-size-vertical: 1;
     }
     #input:focus {
         border: none;
         background: transparent;
+    }
+    #input .text-area--placeholder {
+        color: $text-muted;
     }
 
     #footer {
@@ -592,11 +649,12 @@ class FAgentApp(App, ChatView):
             Static(self._session_text(), id="session"),
             Static("快捷键", classes="section"),
             Static(
-                "Enter   发送\n"
-                "Esc     停止回答\n"
-                "Ctrl+B  显示/隐藏侧栏\n"
-                "Ctrl+L  清空会话\n"
-                "Ctrl+Q  退出",
+                "Enter         发送\n"
+                "Shift+Enter   换行\n"
+                "Esc           停止回答\n"
+                "Ctrl+B        显示/隐藏侧栏\n"
+                "Ctrl+L        清空会话\n"
+                "Ctrl+Q        退出",
                 classes="list",
             ),
         ]
@@ -617,8 +675,8 @@ class FAgentApp(App, ChatView):
             ),
             Horizontal(
                 Static("❯", id="prompt"),
-                HistoryInput(
-                    placeholder="随便问点什么…",
+                HistoryTextArea(
+                    placeholder="随便问点什么…（Shift+Enter 换行）",
                     id="input",
                 ),
                 id="input-bar",
@@ -636,7 +694,7 @@ class FAgentApp(App, ChatView):
         self._apply_sidebar()
         self._update_status()
         self._presenter.start()
-        input_widget = self.query_one("#input", HistoryInput)
+        input_widget = self.query_one("#input", HistoryTextArea)
         input_widget.focus()
         self.call_after_refresh(self._center_welcome)
 
@@ -649,6 +707,11 @@ class FAgentApp(App, ChatView):
             pass
         self._apply_sidebar()
         self.call_after_refresh(self._center_welcome)
+        try:
+            input_widget = self.query_one("#input", HistoryTextArea)
+        except NoMatches:
+            return
+        self.call_after_refresh(input_widget.sync_height)
 
     def _apply_sidebar(self):
         """窄屏自动收起侧栏，Ctrl+B 可手动切换。"""
@@ -673,7 +736,10 @@ class FAgentApp(App, ChatView):
             pass
 
     def _hint_text(self):
-        return "Enter 发送   ↑↓ 历史   Esc 停止   / 命令   Ctrl+L 清空   Ctrl+Q 退出"
+        return (
+            "Enter 发送   Shift+Enter 换行   ↑↓ 历史   "
+            "Esc 停止   / 命令   Ctrl+L 清空   Ctrl+Q 退出"
+        )
 
     def _center_welcome(self):
         """把开场页垂直居中，终端高度变化时保持视觉平衡。"""
@@ -688,12 +754,6 @@ class FAgentApp(App, ChatView):
 
     # ---------------------------------------------------------------- 输入
 
-    def on_input_focus(self):
-        self.query_one("#input-bar").add_class("focused")
-
-    def on_input_blur(self):
-        self.query_one("#input-bar").remove_class("focused")
-
     def action_cancel_request(self):
         if not self._presenter.busy:
             return
@@ -701,9 +761,10 @@ class FAgentApp(App, ChatView):
             self._was_cancelled = True
             self._set_state("正在停止…")
 
-    def on_input_submitted(self, event: Input.Submitted):
+    def on_history_text_area_submitted(self, event: HistoryTextArea.Submitted):
+        input_widget = event.text_area
         text = event.value.strip()
-        event.input.value = ""
+        input_widget.text = ""
 
         if not text:
             return
@@ -712,7 +773,7 @@ class FAgentApp(App, ChatView):
             return
         if text == "/clear":
             self._presenter.clear()
-            event.input.focus()
+            input_widget.focus()
             return
         if text == "/help":
             self._append(NoticeMessage(self._help_text()))
@@ -736,7 +797,7 @@ class FAgentApp(App, ChatView):
         if self._presenter.busy:
             return
         self._last_prompt = text
-        input_widget = self.query_one("#input", HistoryInput)
+        input_widget = self.query_one("#input", HistoryTextArea)
         input_widget.remember(text)
         input_widget.disabled = True
         self.run_worker(
@@ -750,8 +811,9 @@ class FAgentApp(App, ChatView):
         return (
             "命令：/help 帮助 · /tools 工具说明 · /retry 重发上一条 · "
             "/clear 清空会话 · /quit 退出\n"
-            "快捷键：Enter 发送 · ↑↓ 历史 · Esc 停止回答 · "
-            "Ctrl+L 清空 · Ctrl+Q 退出"
+            "快捷键：Enter 发送 · Shift+Enter 换行（Ctrl+J 同样可用）· "
+            "↑↓ 历史 · Esc 停止回答 · Ctrl+L 清空 · Ctrl+Q 退出\n"
+            "支持直接粘贴多行文本，输入框会随内容自动增高。"
         )
 
     def _tools_text(self):
@@ -764,7 +826,7 @@ class FAgentApp(App, ChatView):
 
     def action_clear(self):
         self._presenter.clear()
-        self.query_one("#input", HistoryInput).focus()
+        self.query_one("#input", HistoryTextArea).focus()
 
     # ---------------------------------------------------------------- 渲染
 
@@ -907,7 +969,7 @@ class FAgentApp(App, ChatView):
 
     def set_busy(self, busy):
         def apply():
-            input_widget = self.query_one("#input", HistoryInput)
+            input_widget = self.query_one("#input", HistoryTextArea)
             input_widget.disabled = busy
             if busy:
                 self._set_state("思考中…")
