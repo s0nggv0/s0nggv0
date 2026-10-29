@@ -3,14 +3,18 @@
 import os
 import threading
 import time
+from pathlib import Path
 
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
+from textual.screen import ModalScreen
 from textual.theme import Theme
-from textual.widgets import Collapsible, Markdown, Static, TextArea
+from textual.widgets import Collapsible, Markdown, OptionList, Static, TextArea
+from textual.widgets.option_list import Option
 
 from .base import ChatPresenter, ChatView
 
@@ -39,6 +43,17 @@ FAGENT_THEME = Theme(
 )
 
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+# 命令面板与 /help 共用的命令清单
+COMMANDS = (
+    ("/help", "显示帮助"),
+    ("/tools", "列出可用工具"),
+    ("/retry", "重发上一条提问"),
+    ("/clear", "清空会话"),
+    ("/quit", "退出程序"),
+)
+
+_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 
 # ANSI Shadow 字体的 FAGENT 字标
 _LOGO_LINES = (
@@ -191,6 +206,7 @@ class ToolMessage(Collapsible):
         # 注意不要用 _name：DOMNode 内部同名属性会被 super().__init__ 覆盖
         self._tool_name = name
         self._tool_args = args or {}
+        self._result_text = ""
         self._body = Static(Text("等待工具返回…", style=MUTED), classes="tool-body")
         super().__init__(self._body, title=f"⠋ {name}", collapsed=True)
 
@@ -199,12 +215,22 @@ class ToolMessage(Collapsible):
 
     def finish(self, result, seconds):
         result = str(result)
+        self._result_text = result
         failed = result.lstrip().startswith("Error")
         mark = "✗" if failed else "✓"
         self.title = f"{mark} {self._tool_name}{self._summary()} · {seconds:.2f}s"
         self.add_class("failed" if failed else "done")
         self._body.update(self._detail(result))
         self.collapsed = result.count("\n") > 8 or len(result) > 600
+
+    def full_text(self):
+        """工具名、参数与完整输出，供复制 / 全屏查看。"""
+        if not self._result_text:
+            return ""
+        return f"{self._tool_name}{self._summary()}\n\n{self._result_text}"
+
+    def toggle(self):
+        self.collapsed = not self.collapsed
 
     def _summary(self):
         if not self._tool_args:
@@ -221,6 +247,57 @@ class ToolMessage(Collapsible):
         content.append("\n\n")
         content.append(result, style=TEXT)
         return content
+
+
+class ToolResultScreen(ModalScreen):
+    """工具结果全屏查看：PgUp/PgDn 翻页，c 复制，Esc 关闭。"""
+
+    BINDINGS = [
+        Binding("escape", "close_viewer", "关闭", priority=True),
+        Binding("pageup", "page_up", "上一页", show=False),
+        Binding("pagedown", "page_down", "下一页", show=False),
+        Binding("c", "copy_result", "复制", show=False),
+    ]
+
+    def __init__(self, name, text):
+        super().__init__()
+        self._result_name = name
+        self._result_text = text
+
+    def compose(self):
+        title = Text()
+        title.append(self._result_name, style=f"bold {ACCENT}")
+        title.append("  工具结果", style=MUTED)
+        title.append(f"  ·  {len(self._result_text.splitlines())} 行", style=MUTED)
+
+        hint = Static(
+            "PgUp / PgDn 翻页   ·   c 复制   ·   Esc 关闭",
+            id="viewer-footer",
+        )
+        yield Vertical(
+            Static(title, id="viewer-title"),
+            VerticalScroll(
+                Static(Text(self._result_text or "（无输出）", style=TEXT)),
+                id="viewer-body",
+            ),
+            hint,
+            id="viewer-box",
+        )
+
+    def action_close_viewer(self):
+        self.dismiss()
+
+    def action_page_up(self):
+        self.query_one("#viewer-body", VerticalScroll).scroll_page_up()
+
+    def action_page_down(self):
+        self.query_one("#viewer-body", VerticalScroll).scroll_page_down()
+
+    def action_copy_result(self):
+        self.app.copy_to_clipboard(self._result_text)
+        self.query_one("#viewer-footer", Static).update(
+            "已复制到剪贴板（终端需支持 OSC 52）   ·   Esc 关闭"
+        )
 
 
 class ErrorMessage(Static):
@@ -267,6 +344,8 @@ class HistoryTextArea(TextArea):
         self._history = []
         self._index = None
         self._draft = ""
+        # App 注入的补全键处理函数：返回 True 表示已消费该按键
+        self.completion_handler = None
 
     def remember(self, text):
         """记录一条已提交的输入（相邻重复不重复记录）"""
@@ -277,6 +356,11 @@ class HistoryTextArea(TextArea):
         self._index = None
 
     async def _on_key(self, event):
+        if self.completion_handler is not None and event.key == "tab":
+            if self.completion_handler("tab"):
+                event.prevent_default()
+                event.stop()
+                return
         if event.key == "enter":
             event.prevent_default()
             event.stop()
@@ -290,12 +374,25 @@ class HistoryTextArea(TextArea):
         await super()._on_key(event)
 
     def action_cursor_up(self, select=False):
+        # 补全面板可见时优先移动选中项，否则按行移动 / 回溯历史
+        if (
+            not select
+            and self.completion_handler is not None
+            and self.completion_handler("up")
+        ):
+            return
         # 光标已在首行时，↑ 改为回溯历史；多行内部仍按行移动
         if not select and self.cursor_at_first_line and self._history_step(-1):
             return
         super().action_cursor_up(select)
 
     def action_cursor_down(self, select=False):
+        if (
+            not select
+            and self.completion_handler is not None
+            and self.completion_handler("down")
+        ):
+            return
         # 光标已在末行时，↓ 改为前进历史
         if not select and self.cursor_at_last_line and self._history_step(1):
             return
@@ -547,6 +644,23 @@ class FAgentApp(App, ChatView):
         color: $text-muted;
     }
 
+    #completions {
+        display: none;
+        height: auto;
+        max-height: 9;
+        margin: 0 2;
+        padding: 0;
+        border: round $panel;
+        background: $surface;
+    }
+    #completions > .option-list--option {
+        padding: 0 1;
+    }
+    #completions > .option-list--option-highlighted {
+        background: $boost;
+        color: $primary;
+    }
+
     #input-bar {
         height: auto;
         min-height: 3;
@@ -596,9 +710,40 @@ class FAgentApp(App, ChatView):
         color: $text-muted;
         text-align: right;
     }
+
+    ToolResultScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #viewer-box {
+        width: 92%;
+        height: 82%;
+        max-width: 140;
+        padding: 0 1;
+        border: round $primary;
+        background: $surface;
+    }
+    #viewer-title {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+    }
+    #viewer-body {
+        height: 1fr;
+        padding: 1 1;
+        background: transparent;
+    }
+    #viewer-footer {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
     """
 
     BINDINGS = [
+        Binding("ctrl+t", "toggle_tool_result", "展开/折叠工具结果", priority=True),
+        Binding("ctrl+y", "copy_tool_result", "复制工具结果", priority=True),
+        Binding("ctrl+o", "view_tool_result", "查看工具结果", priority=True),
         ("ctrl+b", "toggle_sidebar", "侧栏"),
         ("ctrl+l", "clear", "清空会话"),
         ("ctrl+q", "quit", "退出"),
@@ -614,9 +759,16 @@ class FAgentApp(App, ChatView):
         self._think_started = None
         self._tool = None
         self._tool_started = None
+        self._last_tool_message = None
         self._tool_rows = {}
         self._running_tool = None
         self._sidebar_hidden = False
+        self._completion_items = []
+        self._completion_visible = False
+        self._completion_signature = ()
+        self._completion_token_start = 0
+        self._completion_kind = None
+        self._completion_suppress = False
         self._spinner_timer = None
         self._spinner_frame = 0
         self._welcome = None
@@ -651,7 +803,11 @@ class FAgentApp(App, ChatView):
             Static(
                 "Enter         发送\n"
                 "Shift+Enter   换行\n"
+                "Tab           补全\n"
                 "Esc           停止回答\n"
+                "Ctrl+T        展开工具结果\n"
+                "Ctrl+Y        复制工具结果\n"
+                "Ctrl+O        查看工具结果\n"
                 "Ctrl+B        显示/隐藏侧栏\n"
                 "Ctrl+L        清空会话\n"
                 "Ctrl+Q        退出",
@@ -673,6 +829,7 @@ class FAgentApp(App, ChatView):
                 ),
                 id="main",
             ),
+            OptionList(id="completions"),
             Horizontal(
                 Static("❯", id="prompt"),
                 HistoryTextArea(
@@ -695,6 +852,7 @@ class FAgentApp(App, ChatView):
         self._update_status()
         self._presenter.start()
         input_widget = self.query_one("#input", HistoryTextArea)
+        input_widget.completion_handler = self._handle_completion_key
         input_widget.focus()
         self.call_after_refresh(self._center_welcome)
 
@@ -725,6 +883,191 @@ class FAgentApp(App, ChatView):
         self._sidebar_hidden = not self._sidebar_hidden
         self._apply_sidebar()
 
+    # ---------------------------------------------------------------- 补全
+
+    def on_text_area_changed(self, event):
+        if event.text_area.id == "input":
+            self._update_completions(event.text_area.text)
+
+    def _handle_completion_key(self, key):
+        """输入框按键回调：补全面板可见时消费 Tab / ↑ / ↓。"""
+        if not self._completion_visible:
+            return False
+        try:
+            palette = self.query_one("#completions", OptionList)
+        except NoMatches:
+            return False
+        count = palette.option_count
+        if not count:
+            self._hide_completions()
+            return False
+        if key == "tab":
+            self._apply_completion()
+            return True
+        if key in ("up", "down"):
+            index = palette.highlighted or 0
+            offset = -1 if key == "up" else 1
+            palette.highlighted = (index + offset) % count
+            palette.scroll_to_highlight()
+            return True
+        return False
+
+    def _update_completions(self, text):
+        if self._completion_suppress:
+            self._completion_suppress = False
+            self._hide_completions()
+            return
+
+        context = self._completion_context(text)
+        if context is None:
+            self._hide_completions()
+            return
+
+        kind, entries, token_start = context
+        if not entries:
+            self._hide_completions()
+            return
+
+        try:
+            palette = self.query_one("#completions", OptionList)
+        except NoMatches:
+            return
+
+        signature = (kind, tuple(insert for _, insert in entries))
+        if signature != self._completion_signature:
+            palette.clear_options()
+            palette.add_options([Option(label) for label, _ in entries])
+            self._completion_signature = signature
+            self._completion_items = [(kind, insert) for _, insert in entries]
+            palette.highlighted = 0
+            palette.scroll_to_highlight()
+
+        self._completion_kind = kind
+        self._completion_token_start = token_start
+        palette.display = True
+        self._completion_visible = True
+
+    def _hide_completions(self):
+        try:
+            palette = self.query_one("#completions", OptionList)
+        except NoMatches:
+            palette = None
+        if palette is not None:
+            palette.display = False
+            palette.clear_options()
+        self._completion_visible = False
+        self._completion_items = []
+        self._completion_signature = ()
+        self._completion_kind = None
+
+    def _completion_context(self, text):
+        """返回（类型, 候选项, token 起点），没有可补全内容时返回 None。"""
+        if not text:
+            return None
+
+        # 命令：仅当整段输入是 /xxx 时生效
+        if text.startswith("/") and not any(ch.isspace() for ch in text):
+            prefix = text[1:].lower()
+            entries = [
+                (
+                    Text.assemble(
+                        (command, f"bold {ACCENT}"),
+                        "  ",
+                        (description, MUTED),
+                    ),
+                    command,
+                )
+                for command, description in COMMANDS
+                if command[1:].lower().startswith(prefix)
+            ]
+            return ("command", entries, 0) if entries else None
+
+        # 文件：光标所在 token 以 @ 开头时补全路径
+        if text[-1].isspace():
+            return None
+        token = text.rsplit(None, 1)[-1]
+        if not token.startswith("@"):
+            return None
+        entries = self._file_entries(token[1:])
+        if not entries:
+            return None
+        return ("file", entries, len(text) - len(token))
+
+    def _file_entries(self, fragment):
+        raw = fragment.replace("\\", "/")
+        directory, base = os.path.split(raw)
+        if directory in ("", "."):
+            root = Path.cwd()
+            prefix = "" if not directory else "./"
+        else:
+            expanded = os.path.expanduser(directory)
+            root = Path(expanded) if os.path.isabs(expanded) else Path.cwd() / expanded
+            prefix = directory.rstrip("/") + "/"
+
+        matches = []
+        try:
+            with os.scandir(root) as entries:
+                for count, entry in enumerate(entries):
+                    if count >= 3000:
+                        break
+                    name = entry.name
+                    if name.startswith(".") and not base.startswith("."):
+                        continue
+                    try:
+                        is_dir = entry.is_dir()
+                    except OSError:
+                        is_dir = False
+                    if is_dir and name in _SKIP_DIRS:
+                        continue
+                    if not name.lower().startswith(base.lower()):
+                        continue
+                    matches.append((not is_dir, name.lower(), name, is_dir))
+        except OSError:
+            return []
+
+        matches.sort()
+        result = []
+        for _, _, name, is_dir in matches[:8]:
+            insert = f"@{prefix}{name}{'/' if is_dir else ''}"
+            label = Text.assemble(
+                ("◍ " if is_dir else "· ", MUTED),
+                (insert, ACCENT if is_dir else TEXT),
+            )
+            result.append((label, insert))
+        return result
+
+    def _apply_completion(self, index=None):
+        if not self._completion_visible or not self._completion_items:
+            return
+        try:
+            palette = self.query_one("#completions", OptionList)
+        except NoMatches:
+            return
+        if index is None:
+            index = palette.highlighted or 0
+        if not 0 <= index < len(self._completion_items):
+            index = 0
+        kind, insert = self._completion_items[index]
+
+        input_widget = self.query_one("#input", HistoryTextArea)
+        if kind == "command":
+            self._completion_suppress = True
+            input_widget.text = insert
+        else:
+            current = input_widget.text
+            start = self._completion_token_start
+            self._completion_suppress = not insert.endswith("/")
+            input_widget.text = current[:start] + insert
+
+        input_widget.cursor_location = input_widget.document.end
+        input_widget.focus()
+        if self._completion_suppress:
+            self._hide_completions()
+
+    def on_option_list_option_selected(self, event):
+        self._apply_completion(event.option_index)
+
+    # ---------------------------------------------------------------- 会话信息
     def _session_text(self):
         elapsed = "—" if self._elapsed is None else f"{self._elapsed:.1f}s"
         return f"轮次  {self._rounds}\n耗时  {elapsed}\n状态  {self._state}"
@@ -737,8 +1080,8 @@ class FAgentApp(App, ChatView):
 
     def _hint_text(self):
         return (
-            "Enter 发送   Shift+Enter 换行   ↑↓ 历史   "
-            "Esc 停止   / 命令   Ctrl+L 清空   Ctrl+Q 退出"
+            "Enter 发送   Shift+Enter 换行   / 命令   @ 文件   Tab 补全   "
+            "Ctrl+T 结果   Ctrl+O 查看   Ctrl+Q 退出"
         )
 
     def _center_welcome(self):
@@ -755,16 +1098,57 @@ class FAgentApp(App, ChatView):
     # ---------------------------------------------------------------- 输入
 
     def action_cancel_request(self):
+        if self._completion_visible:
+            self._hide_completions()
+            return
         if not self._presenter.busy:
             return
         if self._presenter.cancel():
             self._was_cancelled = True
             self._set_state("正在停止…")
 
+    # ------------------------------------------------------------ 工具结果
+
+    def action_toggle_tool_result(self):
+        message = self._last_tool_message
+        if message is None or not message.is_mounted:
+            self._append(NoticeMessage("暂无工具结果可展开。"))
+            return
+        message.toggle()
+        if not message.collapsed:
+            chat = self.query_one("#chat", VerticalScroll)
+            self.call_after_refresh(chat.scroll_end, animate=False)
+
+    def action_copy_tool_result(self):
+        text = self._latest_tool_text()
+        if text is None:
+            return
+        self.copy_to_clipboard(text)
+        self._append(NoticeMessage("已复制工具结果到剪贴板（终端需支持 OSC 52）。"))
+
+    def action_view_tool_result(self):
+        text = self._latest_tool_text()
+        if text is None:
+            return
+        name = self._last_tool_message._tool_name
+        self.push_screen(ToolResultScreen(name, text))
+
+    def _latest_tool_text(self):
+        message = self._last_tool_message
+        if message is None or not message.is_mounted:
+            self._append(NoticeMessage("暂无工具结果。"))
+            return None
+        text = message.full_text()
+        if not text:
+            self._append(NoticeMessage("工具尚未返回结果。"))
+            return None
+        return text
+
     def on_history_text_area_submitted(self, event: HistoryTextArea.Submitted):
         input_widget = event.text_area
         text = event.value.strip()
         input_widget.text = ""
+        self._hide_completions()
 
         if not text:
             return
@@ -811,8 +1195,10 @@ class FAgentApp(App, ChatView):
         return (
             "命令：/help 帮助 · /tools 工具说明 · /retry 重发上一条 · "
             "/clear 清空会话 · /quit 退出\n"
+            "输入 / 弹出命令面板，输入 @ 补全文件路径，Tab 应用候选，↑↓ 选择候选。\n"
             "快捷键：Enter 发送 · Shift+Enter 换行（Ctrl+J 同样可用）· "
-            "↑↓ 历史 · Esc 停止回答 · Ctrl+L 清空 · Ctrl+Q 退出\n"
+            "Esc 停止回答 · Ctrl+T 展开/折叠工具结果 · Ctrl+Y 复制工具结果 · "
+            "Ctrl+O 全屏查看工具结果 · Ctrl+B 侧栏 · Ctrl+L 清空 · Ctrl+Q 退出\n"
             "支持直接粘贴多行文本，输入框会随内容自动增高。"
         )
 
@@ -888,6 +1274,7 @@ class FAgentApp(App, ChatView):
             widget = ToolMessage(name, args)
             widget.add_class("message")
             self._tool = widget
+            self._last_tool_message = widget
             self._append(widget)
             self._set_sidebar_running(name)
             self._set_state(f"执行 {name}…")
@@ -915,6 +1302,7 @@ class FAgentApp(App, ChatView):
                 fallback = ToolMessage(name, args)
                 fallback.add_class("message")
                 fallback.finish(result, seconds)
+                self._last_tool_message = fallback
                 self._append(fallback)
             # 工具结果回传后模型还会继续推理，重新显示思考提示
             self._show_thinking()
@@ -972,6 +1360,7 @@ class FAgentApp(App, ChatView):
             input_widget = self.query_one("#input", HistoryTextArea)
             input_widget.disabled = busy
             if busy:
+                self._hide_completions()
                 self._set_state("思考中…")
                 return
 
@@ -993,6 +1382,8 @@ class FAgentApp(App, ChatView):
             self._drop_thinking()
             self._answer = None
             self._tool = None
+            self._last_tool_message = None
+            self._hide_completions()
             self._set_sidebar_running(None)
             self.query_one("#chat", VerticalScroll).remove_children()
             self._rounds = 0

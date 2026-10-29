@@ -97,7 +97,7 @@ python chat_file.py
 在 Practice02 基础上重构的 Function Call 智能助手，采用 **`core` + `tui`** 两层架构，业务逻辑与界面完全隔离。
 
 ```bash
-pip install openai textual
+pip install openai textual trafilatura
 
 python main.py                 # 默认 Textual TUI
 python main.py --ui console    # 命令行界面
@@ -105,6 +105,7 @@ python main.py --ui console    # 命令行界面
 
 - `core/`：配置解析、会话与工具调用循环、15 个工具（`@tool` 装饰器注册，新增工具无需改分发代码）
 - `tui/`：`ChatView` 契约 + `ChatPresenter` 共享控制器，内置 Textual TUI 与命令行两种界面，可按同一契约扩展新界面
+- TUI 支持 `/` 命令面板、`@` 文件路径补全，以及工具结果的展开、复制与全屏分页查看
 - 配置同样从 `config.ini` 读取（`base_url` / `model_name` / `key`，联网搜索另需 `[search]` 小节的 `baidu_api_key`），已被 `.gitignore` 排除
 - 能力：日期、闰年、当前目录，文件 / 目录增删改查，联网搜索与网页正文抓取，以及本机 CLI 调用
 - `getDate` **仅 Windows 可用**；`fetchWeb` 依赖系统 `curl` 与 `trafilatura`；`RunCli` 以当前用户权限执行任意本机程序，仅建议在可信环境使用；其余工具跨平台
