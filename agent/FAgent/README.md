@@ -20,7 +20,8 @@ FAgent/
 │       ├── common.py        # 路径解析、编码探测、文本文件判定
 │       ├── system.py        # getDate / isLeapYear / getCwd
 │       ├── filesystem.py    # 目录与文件的增删改查
-│       └── web.py           # searchWeb：联网搜索；fetchWeb：抓取网页正文
+│       ├── web.py           # searchWeb：联网搜索；fetchWeb：抓取网页正文
+│       └── cli.py           # RunCli：以当前用户权限调用本机 CLI 程序
 └── tui/                     # 展示层：交互与渲染
     ├── __init__.py
     ├── base.py              # ChatView 契约 + ChatPresenter 共享控制器
@@ -111,7 +112,7 @@ python main.py --help
 工具执行时以单行消息显示 spinner 与参数，完成后显示耗时与可折叠结果，回答结束后自动转为 Markdown 渲染。
 配色使用内置的自定义深色主题（近黑背景 + 暖橙强调色），终端宽度不足时自动精简提示栏、字标与右侧栏。
 
-## 工具列表（共 14 个）
+## 工具列表（共 15 个）
 
 | 工具 | 参数 | 功能 |
 | --- | --- | --- |
@@ -129,6 +130,7 @@ python main.py --help
 | `renamePath` | `src`、`dst` | 重命名/移动，目标不可已存在 |
 | `fetchWeb` | `url`、`max_chars=20000` | 用 curl 抓取网页，经 trafilatura 提取正文并转为 Markdown |
 | `searchWeb` | `query`、`top_k=10` | 调用百度千帆搜索 API，返回结果摘要与参考来源标题、URL |
+| `RunCli` | `command`、`args`、`timeout=60` | 以当前用户权限调用本机任意 CLI，返回 stdout、stderr 与退出码，超长输出截断 |
 
 所有工具错误统一以 `Error: ...` 文本回传给模型，不会中断对话。
 
@@ -138,13 +140,15 @@ python main.py --help
 - `createFile` 目标已存在时不覆盖，需改用 `editFile`。
 - `readFile` / `editFile` 只处理纯文本文件，二进制文件直接报错。
 - `renamePath` 目标已存在时报错，不会静默覆盖。
+- `RunCli` 以当前用户权限执行任意本机程序，**并非沙箱**：请仅在可信环境中使用，并注意模型可能发起删除、修改系统状态等操作。
+- `RunCli` 使用参数列表且 `shell=False`，不经过 Shell 拼接；标准输入置空，超时上限 600 秒，超长输出自动截断。
 - 工具异常由 `registry.run_tool` 统一捕获，避免聊天循环中断。
 
 ## 扩展指南
 
 ### 新增工具
 
-在 `core/tools/` 下已有模块（`system.py`、`filesystem.py`、`web.py`）中添加带 `@tool` 装饰器的函数即可：
+在 `core/tools/` 下已有模块（`system.py`、`filesystem.py`、`web.py`、`cli.py`）中添加带 `@tool` 装饰器的函数即可：
 
 ```python
 from .registry import tool
