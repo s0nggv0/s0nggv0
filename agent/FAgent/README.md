@@ -14,6 +14,7 @@ FAgent/
 │   ├── __init__.py          # 对外统一出口
 │   ├── config.py            # 配置模型、解析与校验
 │   ├── agent.py             # 会话历史、模型调用、工具调用循环
+│   ├── skills.py            # 技能目录扫描、frontmatter 解析与系统提示生成
 │   └── tools/               # 工具业务模块
 │       ├── __init__.py      # 注册编排 + 公共 API
 │       ├── registry.py      # @tool 注册、参数校验、异常兜底、统一分发
@@ -21,7 +22,9 @@ FAgent/
 │       ├── system.py        # getDate / isLeapYear / getCwd
 │       ├── filesystem.py    # 目录与文件的增删改查
 │       ├── web.py           # searchWeb：联网搜索；fetchWeb：抓取网页正文
-│       └── cli.py           # RunCli：以当前用户权限调用本机 CLI 程序
+│       ├── cli.py           # RunCli：以当前用户权限调用本机 CLI 程序
+│       └── skill.py         # loadSkill：按需加载技能 SKILL.md 全文或附件文件
+├── .agents/skills/          # 技能目录（Agent Skills 规范，可选，按需创建），每个技能一个目录（SKILL.md + references）
 └── tui/                     # 展示层：交互与渲染
     ├── __init__.py
     ├── base.py              # ChatView 契约 + ChatPresenter 共享控制器
@@ -120,7 +123,7 @@ python main.py --help
 `Ctrl+T` 展开 / 折叠、`Ctrl+Y` 复制、`Ctrl+O` 全屏分页查看。
 配色使用内置的自定义深色主题（近黑背景 + 暖橙强调色），终端宽度不足时自动精简提示栏、字标与右侧栏。
 
-## 工具列表（共 15 个）
+## 工具列表（共 16 个）
 
 | 工具 | 参数 | 功能 |
 | --- | --- | --- |
@@ -139,8 +142,34 @@ python main.py --help
 | `fetchWeb` | `url`、`max_chars=20000` | 用 curl 抓取网页，经 trafilatura 提取正文并转为 Markdown |
 | `searchWeb` | `query`、`top_k=10` | 调用百度千帆搜索 API，返回结果摘要与参考来源标题、URL |
 | `RunCli` | `command`、`args`、`timeout=60` | 以当前用户权限调用本机任意 CLI，返回 stdout、stderr 与退出码，超长输出截断 |
+| `loadSkill` | `name`、`filename?` | 仅传 `name` 返回技能 SKILL.md 全文；同时传 `filename` 读取技能附件（仅限技能目录内部） |
 
 所有工具错误统一以 `Error: ...` 文本回传给模型，不会中断对话。
+
+## 技能（Skill）
+
+遵循 Agent Skills 规范：以**程序启动时的工作目录**为项目根，技能位于
+`<项目根>/.agents/skills/<技能目录>/SKILL.md`，文件以 YAML frontmatter 开头，
+必须包含 `name` 与 `description` 字段；同目录可附带 `references/` 等参考文件。
+
+启动时仅扫描各技能的 `name` 与 `description` 并注入系统提示，不读取技能正文。
+模型判断任务匹配后调用 `loadSkill(name)` 加载 SKILL.md 全文；需要细节时再调用
+`loadSkill(name, filename)` 读取附件文件（此时不重复返回 SKILL.md）。`filename`
+的解析规则：
+
+- 优先精确路径匹配，依次兼容绝对路径、相对技能目录的路径、相对项目根的路径
+- 仅提供文件名时在技能目录内递归搜索；命中多个同名文件时返回候选路径，由模型决定读取哪个
+- 读取范围始终限制在该技能目录内部，解析到目录之外的路径会被拒绝
+
+当前未安装技能。此前安装的 `humanizer`（去 AI 味）已迁移至 `office/.agents/skills/`。
+
+技能安装后，当用户请求与技能描述相符时，模型会先调用 `loadSkill` 加载操作规程再执行，
+也可以在提问中显式指定技能名。
+
+安装新技能时，把包含 `SKILL.md` 的目录整体复制到 `<项目根>/.agents/skills/` 下，
+重启 FAgent 即可识别。注意技能目录跟随**启动时的工作目录**，与 `main.py` 所在位置无关：
+想用某套技能，就在存放该技能 `.agents/skills/` 的目录下启动 FAgent。
+技能正文属于第三方提示词，安装前应自行检查其中是否包含不当的工具调用或数据外发指令。
 
 ## 安全护栏
 

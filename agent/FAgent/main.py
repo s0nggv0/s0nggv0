@@ -5,6 +5,7 @@ import os
 import sys
 
 from core import Agent, ConfigError, load_config
+from core.skills import build_skills_prompt, discover_skills
 from tui import available_backends, create_ui
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,7 +36,8 @@ def main(argv=None):
         return 1
 
     try:
-        ui = create_ui(args.ui, Agent(config))
+        system_prompt = build_skills_prompt(discover_skills())
+        ui = create_ui(args.ui, Agent(config, system_prompt=system_prompt))
     except ImportError as e:
         print(f"错误：无法加载 {args.ui} 界面：{e}")
         return 1

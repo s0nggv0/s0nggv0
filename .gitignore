@@ -1,6 +1,9 @@
 # IDE
 .idea/
 
+# 截图工具临时目录
+.screenshots/
+
 # 本地工具配置（含本机端点信息）
 opencode.json
 

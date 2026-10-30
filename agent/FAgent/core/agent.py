@@ -25,11 +25,19 @@ class Agent:
     - on_tool_result(name, args, result)：工具执行完成
     """
 
-    def __init__(self, config, client=None, tools=None, tool_runner=None):
+    def __init__(
+        self,
+        config,
+        client=None,
+        tools=None,
+        tool_runner=None,
+        system_prompt="",
+    ):
         self.config = config
         self.tools = TOOLS if tools is None else tools
         self._client = client
         self._tool_runner = tool_runner or run_tool
+        self.system_prompt = system_prompt or ""
         self.history = []
 
     @property
@@ -47,6 +55,12 @@ class Agent:
 
     def reset(self):
         self.history.clear()
+
+    def _messages(self):
+        """系统提示不写入历史，每次请求时临时拼接。"""
+        if not self.system_prompt:
+            return self.history
+        return [{"role": "system", "content": self.system_prompt}] + self.history
 
     def _stream(self, messages, tools, on_token=None, is_cancelled=None):
         """发起一次流式请求，返回 (完整文本, 工具调用列表)。
@@ -105,7 +119,7 @@ class Agent:
 
         while True:
             content, tool_calls = self._stream(
-                self.history, self.tools, on_token, is_cancelled
+                self._messages(), self.tools, on_token, is_cancelled
             )
 
             # 用户取消：丢弃本轮未完成的工具调用，只保留已输出的文本

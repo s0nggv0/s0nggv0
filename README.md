@@ -15,6 +15,9 @@ agent/
 ├── Practice01/          命令行问答小工具（OpenAI 兼容接口）
 ├── Practice02/          Function Call 工具调用示例（日期、闰年、文件操作）
 └── FAgent/              分层架构的 Function Call 智能助手（core + tui）
+
+office/
+└── .agents/skills/      技能库（Agent Skills 规范，FAgent 可加载）
 ```
 
 ## xmMCP/anythingllm-mcp
@@ -103,13 +106,34 @@ python main.py                 # 默认 Textual TUI
 python main.py --ui console    # 命令行界面
 ```
 
-- `core/`：配置解析、会话与工具调用循环、15 个工具（`@tool` 装饰器注册，新增工具无需改分发代码）
+- `core/`：配置解析、会话与工具调用循环、16 个工具（`@tool` 装饰器注册，新增工具无需改分发代码）
 - `tui/`：`ChatView` 契约 + `ChatPresenter` 共享控制器，内置 Textual TUI 与命令行两种界面，可按同一契约扩展新界面
 - TUI 支持 `/` 命令面板、`@` 文件路径补全，以及工具结果的展开、复制与全屏分页查看
+- `.agents/skills/`：遵循 Agent Skills 规范的技能目录，以**启动时的工作目录**为项目根；启动时仅扫描各技能的 name/description 注入系统提示，模型按需调用 `loadSkill` 工具加载 SKILL.md 全文或附件文件。共享技能库见下方 `office/`，在 `office/` 目录下启动 FAgent 即可加载这些技能
 - 配置同样从 `config.ini` 读取（`base_url` / `model_name` / `key`，联网搜索另需 `[search]` 小节的 `baidu_api_key`），已被 `.gitignore` 排除
-- 能力：日期、闰年、当前目录，文件 / 目录增删改查，联网搜索与网页正文抓取，以及本机 CLI 调用
+- 能力：日期、闰年、当前目录，文件 / 目录增删改查，联网搜索与网页正文抓取，本机 CLI 调用，以及按需加载的技能
 - `getDate` **仅 Windows 可用**；`fetchWeb` 依赖系统 `curl` 与 `trafilatura`；`RunCli` 以当前用户权限执行任意本机程序，仅建议在可信环境使用；其余工具跨平台
 - 详细说明见 `agent/FAgent/README.md`
+
+## office
+
+办公场景的技能库，遵循 Agent Skills 规范（`.agents/skills/<技能目录>/SKILL.md`）。FAgent 以**启动时的工作目录**为项目根扫描技能，因此在 `office/` 目录下启动 FAgent 即可加载以下技能。
+
+| 技能 | 目录 | 用途 |
+| --- | --- | --- |
+| `humanizer` | `unclecheng-reduce-ai-perception-v2/` | 去除文本中的 AI 写作痕迹（去 AI 味 / 润色 / 改写自然） |
+| `撰写通知` | `notice/` | 撰写公司内部通知（标题含部门名、落款含起草人，缺起草人时先询问） |
+| `horoscope-daily` | `horoscope-daily-2.3.0/` | 生成十二星座运势（日/周/月，纯 LLM 生成，无需外部 API） |
+
+启动方式：
+
+```bash
+cd office
+python ..\agent\FAgent\main.py          # 默认 Textual TUI
+python ..\agent\FAgent\main.py --ui console   # 命令行界面
+```
+
+技能读取遵循 Agent Skills 规范：启动时仅扫描 name/description 注入系统提示，正文需模型调用 `loadSkill` 才进入上下文；`loadSkill` 的 `filename` 参数可加载技能目录内的附件文件（读取范围限制在技能目录内部）。
 
 ## 安全说明
 
