@@ -21,9 +21,9 @@ FAgent/
 │       ├── common.py        # 路径解析、编码探测、文本文件判定
 │       ├── system.py        # getDate / isLeapYear / getCwd
 │       ├── filesystem.py    # 目录与文件的增删改查
-│       ├── web.py           # searchWeb：联网搜索；fetchWeb：抓取网页正文
+│       ├── web.py           # searchWeb：联网搜索；fetchWeb：抓取网
 │       ├── cli.py           # RunCli：以当前用户权限调用本机 CLI 程序
-│       └── skill.py         # loadSkill：按需加载技能 SKILL.md 全文或附件文件
+│       └── skill.py         # createSkill：创建新技能；loadSkill：加载技能全文或附件文件
 ├── .agents/skills/          # 技能目录（Agent Skills 规范，可选，按需创建），每个技能一个目录（SKILL.md + references）
 └── tui/                     # 展示层：交互与渲染
     ├── __init__.py
@@ -123,7 +123,7 @@ python main.py --help
 `Ctrl+T` 展开 / 折叠、`Ctrl+Y` 复制、`Ctrl+O` 全屏分页查看。
 配色使用内置的自定义深色主题（近黑背景 + 暖橙强调色），终端宽度不足时自动精简提示栏、字标与右侧栏。
 
-## 工具列表（共 16 个）
+## 工具列表（共 17 个）
 
 | 工具 | 参数 | 功能 |
 | --- | --- | --- |
@@ -143,6 +143,7 @@ python main.py --help
 | `searchWeb` | `query`、`top_k=10` | 调用百度千帆搜索 API，返回结果摘要与参考来源标题、URL |
 | `RunCli` | `command`、`args`、`timeout=60` | 以当前用户权限调用本机任意 CLI，返回 stdout、stderr 与退出码，超长输出截断 |
 | `loadSkill` | `name`、`filename?` | 仅传 `name` 返回技能 SKILL.md 全文；同时传 `filename` 读取技能附件（仅限技能目录内部） |
+| `createSkill` | `name`、`skillContext` | 在 `.agents/skills/` 下创建技能目录并生成合规的 SKILL.md，已存在时不覆盖 |
 
 所有工具错误统一以 `Error: ...` 文本回传给模型，不会中断对话。
 
@@ -160,6 +161,14 @@ python main.py --help
 - 优先精确路径匹配，依次兼容绝对路径、相对技能目录的路径、相对项目根的路径
 - 仅提供文件名时在技能目录内递归搜索；命中多个同名文件时返回候选路径，由模型决定读取哪个
 - 读取范围始终限制在该技能目录内部，解析到目录之外的路径会被拒绝
+
+也可以在对话中直接要求模型创建技能，模型会调用 `createSkill(name, skillContext)`：
+在 `.agents/skills/` 下生成以规范名命名的子目录并写入 `SKILL.md`。`name` 统一规范为
+小写字母、数字和连字符格式；`skillContext` 可包含 frontmatter 与正文，缺少 frontmatter
+时会自动补全 `name` 与 `description`（未给出 description 时取正文首个有效行）。
+目标技能已存在时返回提示且不覆盖；需要 `references/`、`scripts/` 等辅助文件时，
+由模型继续调用 `createFile`、`createDirectory` 等文件工具完成。新建技能需重启 FAgent
+才会进入启动时的技能清单。
 
 当前未安装技能。此前安装的 `humanizer`（去 AI 味）已迁移至 `office/.agents/skills/`。
 

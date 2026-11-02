@@ -17,7 +17,12 @@ agent/
 └── FAgent/              分层架构的 Function Call 智能助手（core + tui）
 
 office/
-└── .agents/skills/      技能库（Agent Skills 规范，FAgent 可加载）
+├── .agents/skills/      技能库（Agent Skills 规范，FAgent 可加载）
+└── deliverables/        技能生成的文档产物（不纳入版本控制）
+
+OfficeCli_#SULP#_26sc1d/
+├── officecli-win-x64.exe  OfficeCli 单文件命令行工具（.exe 不纳入版本控制）
+└── OfficeCli操作说明.md   命令体系、路径语法与工作流说明
 ```
 
 ## xmMCP/anythingllm-mcp
@@ -106,12 +111,12 @@ python main.py                 # 默认 Textual TUI
 python main.py --ui console    # 命令行界面
 ```
 
-- `core/`：配置解析、会话与工具调用循环、16 个工具（`@tool` 装饰器注册，新增工具无需改分发代码）
+- `core/`：配置解析、会话与工具调用循环、17 个工具（`@tool` 装饰器注册，新增工具无需改分发代码）
 - `tui/`：`ChatView` 契约 + `ChatPresenter` 共享控制器，内置 Textual TUI 与命令行两种界面，可按同一契约扩展新界面
 - TUI 支持 `/` 命令面板、`@` 文件路径补全，以及工具结果的展开、复制与全屏分页查看
-- `.agents/skills/`：遵循 Agent Skills 规范的技能目录，以**启动时的工作目录**为项目根；启动时仅扫描各技能的 name/description 注入系统提示，模型按需调用 `loadSkill` 工具加载 SKILL.md 全文或附件文件。共享技能库见下方 `office/`，在 `office/` 目录下启动 FAgent 即可加载这些技能
+- `.agents/skills/`：遵循 Agent Skills 规范的技能目录，以**启动时的工作目录**为项目根；启动时仅扫描各技能的 name/description 注入系统提示，模型按需调用 `loadSkill` 工具加载 SKILL.md 全文或附件文件；也可在对话中调用 `createSkill` 生成新技能。共享技能库见下方 `office/`，在 `office/` 目录下启动 FAgent 即可加载这些技能
 - 配置同样从 `config.ini` 读取（`base_url` / `model_name` / `key`，联网搜索另需 `[search]` 小节的 `baidu_api_key`），已被 `.gitignore` 排除
-- 能力：日期、闰年、当前目录，文件 / 目录增删改查，联网搜索与网页正文抓取，本机 CLI 调用，以及按需加载的技能
+- 能力：日期、闰年、当前目录，文件 / 目录增删改查，联网搜索与网页正文抓取，本机 CLI 调用，按需加载技能与创建技能
 - `getDate` **仅 Windows 可用**；`fetchWeb` 依赖系统 `curl` 与 `trafilatura`；`RunCli` 以当前用户权限执行任意本机程序，仅建议在可信环境使用；其余工具跨平台
 - 详细说明见 `agent/FAgent/README.md`
 
@@ -124,6 +129,10 @@ python main.py --ui console    # 命令行界面
 | `humanizer` | `unclecheng-reduce-ai-perception-v2/` | 去除文本中的 AI 写作痕迹（去 AI 味 / 润色 / 改写自然） |
 | `撰写通知` | `notice/` | 撰写公司内部通知（标题含部门名、落款含起草人，缺起草人时先询问） |
 | `horoscope-daily` | `horoscope-daily-2.3.0/` | 生成十二星座运势（日/周/月，纯 LLM 生成，无需外部 API） |
+| `chinese-number-cipher` | `chinese-number-cipher/` | 把数字逐位替换为中文大写数字，支持反向还原（数字打码） |
+| `office-documents` | `office-documents/` | 调用 OfficeCli 创建 / 编辑 Word、PPT、Excel 文档 |
+
+`office-documents` 通过 `RunCli` 调用 `OfficeCli_#SULP#_26sc1d/officecli-win-x64.exe`，产物默认写入 `office/deliverables/`（已被 `.gitignore` 排除）。技能创建方式：在 `office/` 下启动 FAgent 后让模型调用 `createSkill`，或直接新增 `.agents/skills/<技能目录>/SKILL.md`。
 
 启动方式：
 
@@ -134,6 +143,25 @@ python ..\agent\FAgent\main.py --ui console   # 命令行界面
 ```
 
 技能读取遵循 Agent Skills 规范：启动时仅扫描 name/description 注入系统提示，正文需模型调用 `loadSkill` 才进入上下文；`loadSkill` 的 `filename` 参数可加载技能目录内的附件文件（读取范围限制在技能目录内部）。
+
+## OfficeCli_#SULP#_26sc1d
+
+面向 AI 的 Office 文档命令行工具，单个 exe 即可读写 `.docx` / `.xlsx` / `.pptx`，无需安装 Microsoft Office 或其他依赖（当前版本 `1.0.158`）。
+
+- 三层操作策略：L1 读取与检查（`view` / `get` / `query` / `validate`）→ L2 DOM 编辑（`add` / `set` / `remove` / `batch`）→ L3 原生 XML（`raw` / `raw-set`）
+- 路径 1-based，所有属性通过 `--prop key=value` 传入；不确定属性名时用 `officecli help <格式> <元素>` 查证
+- 常用流程：`create` 建文件 → `add` / `set` 填内容 → `validate` 与 `view issues` 校验 → `save` / `close` 交付
+- 自带细分技能：`officecli load_skill word|pptx|excel|pitch-deck|morph-ppt|financial-model|data-dashboard|academic-paper`
+- 详细命令、取值格式与常见坑见 `OfficeCli_#SULP#_26sc1d/OfficeCli操作说明.md`
+
+```bash
+officecli-win-x64.exe create report.docx
+officecli-win-x64.exe add report.docx /body --type paragraph --prop text="执行摘要" --prop style=Heading1
+officecli-win-x64.exe view report.docx issues
+```
+
+- 可执行文件由 `*.exe` 规则排除，不纳入版本控制，需自行放入该目录
+- FAgent 通过 `RunCli` 调用它，对应技能为 `office/.agents/skills/office-documents`
 
 ## 安全说明
 

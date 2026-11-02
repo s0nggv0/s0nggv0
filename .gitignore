@@ -24,3 +24,6 @@ __pycache__/
 # 二进制与数据文件
 *.exe
 *.db
+
+# 技能生成的文档产物
+office/deliverables/

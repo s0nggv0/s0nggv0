@@ -6,10 +6,12 @@
 初始化阶段只读取这两个字段，技能正文在模型调用 loadSkill 时才进入上下文。
 """
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 FRONTMATTER_DELIMITER = "---"
+SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 # 程序启动时的工作目录，作为项目根（不是 Python 安装目录，也不是代码存放目录）
 PROJECT_ROOT = Path.cwd()
@@ -88,6 +90,110 @@ def _read_frontmatter(text):
         i += 1
 
     return meta, "\n".join(lines[i:]).lstrip("\n")
+
+
+def normalize_skill_name(name):
+    """把技能名规范为小写字母、数字和连字符格式，返回 (规范名, 错误信息)。"""
+    raw = str(name or "").strip().lstrip("@")
+    if not raw:
+        return None, "Error: name 不能为空"
+
+    candidate = raw.strip().lower()
+    candidate = re.sub(r"[\s_]+", "-", candidate)
+    candidate = re.sub(r"[^a-z0-9-]", "-", candidate)
+    candidate = re.sub(r"-{2,}", "-", candidate).strip("-")
+    if not candidate or not SKILL_NAME_PATTERN.match(candidate):
+        return None, (
+            f"Error: 技能名 {raw} 无法规范为小写字母、数字和连字符组成的格式"
+        )
+    return candidate, None
+
+
+def _escape_yaml_value(value):
+    """把单行文本转成可安全写入双引号 YAML 标量的形式。"""
+    text = " ".join(str(value).split())
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _description_from_body(body):
+    """没有 description 时，取正文第一段有效文字作为描述。"""
+    for line in body.splitlines():
+        text = line.strip().lstrip("#").strip()
+        if text:
+            return text[:200]
+    return ""
+
+
+def _frontmatter_end(lines):
+    """返回 frontmatter 结束分隔线的行下标，找不到时返回 None。"""
+    for index in range(1, len(lines)):
+        if lines[index].strip() == FRONTMATTER_DELIMITER:
+            return index
+    return None
+
+
+def _key_index(lines, key):
+    """在前置元数据行中查找指定键的行下标。"""
+    for index, line in enumerate(lines):
+        if line.partition(":")[0].strip() == key:
+            return index
+    return None
+
+
+def compose_skill_document(name, skill_context):
+    """组装符合 Agent Skills 规范的 SKILL.md，返回 (文档内容, 错误信息)。
+
+    skill_context 可以是含 frontmatter 的完整文档，也可以只是正文；
+    无论哪种情况都会保证 frontmatter 中存在规范的 name 与 description。
+    """
+    text = str(skill_context or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = text.strip("\n")
+    if not text.strip():
+        return None, "Error: skillContext 不能为空"
+
+    lines = text.split("\n")
+    if lines[0].strip() == FRONTMATTER_DELIMITER:
+        end = _frontmatter_end(lines)
+        if end is None:
+            return None, "Error: skillContext 的 frontmatter 缺少结束分隔线 ---"
+    else:
+        end = None
+
+    if end is None:
+        head = []
+        body = text
+    else:
+        head = lines[1:end]
+        body = "\n".join(lines[end + 1:]).strip("\n")
+
+    if not body.strip():
+        return None, "Error: skillContext 缺少技能正文内容"
+
+    name_index = _key_index(head, "name")
+    name_line = f"name: {name}"
+    if name_index is None:
+        head.insert(0, name_line)
+        name_index = 0
+    else:
+        head[name_index] = name_line
+
+    meta, _ = _read_frontmatter(text)
+    description = (meta.get("description") or meta.get("description_zh") or "").strip()
+    if not description:
+        description = _description_from_body(body)
+        if not description:
+            return None, "Error: skillContext 缺少 description 且正文无法生成描述"
+        description_line = f'description: "{_escape_yaml_value(description)}"'
+        description_index = _key_index(head, "description")
+        if description_index is None:
+            head.insert(name_index + 1, description_line)
+        else:
+            head[description_index] = description_line
+
+    document = "\n".join(
+        [FRONTMATTER_DELIMITER, *head, FRONTMATTER_DELIMITER, "", body.strip("\n"), ""]
+    )
+    return document, None
 
 
 def discover_skills(directory=None):
