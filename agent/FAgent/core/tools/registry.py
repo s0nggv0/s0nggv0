@@ -34,6 +34,32 @@ def tool(name, description, parameters):
     return decorator
 
 
+def register_dynamic_tool(name, description, parameters, func):
+    """注册运行时动态发现的工具（如 MCP Server 提供的工具）。
+
+    与 @tool 装饰器的区别：参数不做函数签名过滤，按 JSON Schema 原样透传。
+    """
+    TOOL_SPECS.append(
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+            },
+        }
+    )
+    _HANDLERS[name] = {
+        "func": func,
+        "parameters": parameters,
+        "accepted": None,
+    }
+
+
+def has_tool(name):
+    return name in _HANDLERS
+
+
 def tool_names():
     return [spec["function"]["name"] for spec in TOOL_SPECS]
 
@@ -54,11 +80,12 @@ def run_tool(name, args):
     if missing:
         return "Error: 缺少参数 " + ", ".join(missing)
 
-    kwargs = {
-        key: value
-        for key, value in args.items()
-        if key in handler["accepted"]
-    }
+    accepted = handler["accepted"]
+    kwargs = (
+        dict(args)
+        if accepted is None
+        else {key: value for key, value in args.items() if key in accepted}
+    )
     try:
         return handler["func"](**kwargs)
     except Exception as e:

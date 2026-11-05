@@ -15,6 +15,7 @@ FAgent/
 │   ├── config.py            # 配置模型、解析与校验
 │   ├── agent.py             # 会话历史、模型调用、工具调用循环
 │   ├── skills.py            # 技能目录扫描、frontmatter 解析与系统提示生成
+│   ├── mcp_client.py        # MCP Client：读取 .mcp.json、连接外部 MCP Server、注册并转发 MCP 工具
 │   └── tools/               # 工具业务模块
 │       ├── __init__.py      # 注册编排 + 公共 API
 │       ├── registry.py      # @tool 注册、参数校验、异常兜底、统一分发
@@ -51,19 +52,22 @@ main.py  ──>  core
 ## 环境要求
 
 - Python 3.9 及以上
-- 依赖：`openai`、`textual`（TUI 使用，Rich 随其安装）、`trafilatura`（网页正文提取）
+- 依赖：`openai`、`textual`（TUI 使用，Rich 随其安装）、`trafilatura`（网页正文提取）、`mcp`（MCP Client，可选）
 - `getDate` 工具依赖 Windows 的 `cmd /c date /t && time /t`，其他系统会返回 `Error`
 - `fetchWeb` 依赖本地 `curl` 命令行程序（Windows 10+ 自带），需确保其在 `PATH` 中
 
 安装依赖：
 
 ```bash
-pip install openai textual trafilatura
+pip install openai textual trafilatura mcp
 ```
 
 ## 配置
 
-在 `main.py` 同目录创建 `config.ini`（程序按脚本所在目录定位，与启动路径无关）：
+`config.ini` 按以下顺序定位，取第一个存在的文件：
+
+1. **项目根目录**：程序启动时的工作目录下的 `config.ini`（推荐）
+2. **脚本目录**：`main.py` 所在的 `FAgent/` 目录（兼容旧用法）
 
 ```ini
 base_url=https://api.deepseek.com
@@ -78,6 +82,7 @@ baidu_api_key=你的百度千帆API Key
 - `base_url`、`model_name`、`key` 任一缺失时，程序打印错误并以退出码 1 结束
 - `searchWeb` 使用 `[search]` 小节的 `baidu_api_key` 调用百度千帆搜索 API；缺失时工具会向模型返回明确的错误信息
 - `config.ini` 已被 `.gitignore` 忽略，请勿提交真实密钥
+- 与 `.mcp.json`、`.agents/skills/` 一样以启动时的工作目录为项目根，便于每个项目使用独立配置
 
 ## 运行
 
@@ -123,7 +128,7 @@ python main.py --help
 `Ctrl+T` 展开 / 折叠、`Ctrl+Y` 复制、`Ctrl+O` 全屏分页查看。
 配色使用内置的自定义深色主题（近黑背景 + 暖橙强调色），终端宽度不足时自动精简提示栏、字标与右侧栏。
 
-## 工具列表（共 17 个）
+## 工具列表（本地共 17 个，另有 MCP 动态注册的工具）
 
 | 工具 | 参数 | 功能 |
 | --- | --- | --- |
@@ -146,6 +151,39 @@ python main.py --help
 | `createSkill` | `name`、`skillContext` | 在 `.agents/skills/` 下创建技能目录并生成合规的 SKILL.md，已存在时不覆盖 |
 
 所有工具错误统一以 `Error: ...` 文本回传给模型，不会中断对话。
+
+## MCP 工具（外部 MCP Server）
+
+FAgent 内置 MCP Client，启动时读取**当前项目目录**（程序启动时的工作目录，与 `main.py` 所在位置无关）
+下的 `.mcp.json`，按 MCP Python SDK 标准接口连接外部 MCP Server，支持 `stdio` 与
+`streamable_http`（可简写 `http`）两种协议：
+
+```json
+{
+  "mcpServers": {
+    "local-server": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["some-mcp-server"],
+      "env": { "KEY": "value" }
+    },
+    "Bazi-MCP": {
+      "type": "streamable_http",
+      "url": "https://mcp.api-inference.modelscope.net/<你的服务ID>/mcp"
+    }
+  }
+}
+```
+
+- 连接成功后调用 `list_tools()` 获取工具的名称、描述与参数 Schema，动态注册到本地工具表，
+  模型可像调用 `RunCli`、`fetchWeb` 等本地工具一样调用 MCP 工具
+- 名称冲突处理：MCP 工具名与已有工具（本地或其他 MCP Server）重名时，自动改为
+  `服务器名__工具名` 形式暴露给模型，内部维护服务器与原始工具名的映射用于转发
+- 工具调用经 `registry.run_tool` 统一分发，参数按 JSON Schema 原样透传；
+  返回的文本内容、结构化数据（structuredContent）与错误（isError）都会正确拼接回传给模型
+- 单个服务器连接失败只会在启动时输出明确错误信息，不影响其他服务器与本地工具
+- MCP 会话由后台事件循环线程持有，程序退出时自动关闭；未安装 `mcp` 包时
+  检测到 `.mcp.json` 会提示安装，不影响程序正常启动
 
 ## 技能（Skill）
 

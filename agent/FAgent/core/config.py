@@ -39,11 +39,28 @@ def parse_config(path):
     return cfg
 
 
+def _script_dir():
+    """FAgent 代码所在目录（core 的上一级）。"""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def resolve_config_path():
+    """定位 config.ini：项目根（程序启动时的工作目录）优先，脚本目录兜底。
+
+    两个位置都不存在时返回项目根候选，便于错误提示指向首选位置。
+    """
+    project_path = os.path.join(os.getcwd(), "config.ini")
+    script_path = os.path.join(_script_dir(), "config.ini")
+    if os.path.isfile(project_path):
+        return project_path
+    if os.path.isfile(script_path):
+        return script_path
+    return project_path
+
+
 def default_config_path():
-    """config.ini 固定位于项目根目录（core 的上一级）"""
-    return os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.ini"
-    )
+    """config.ini 的默认路径，规则见 resolve_config_path。"""
+    return resolve_config_path()
 
 
 def load_search_api_key(path=None):
