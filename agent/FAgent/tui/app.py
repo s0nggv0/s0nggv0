@@ -1,5 +1,6 @@
 """Textual TUI 界面：只负责渲染与交互，聊天流程委托给 ChatPresenter。"""
 
+import json
 import os
 import threading
 import time
@@ -16,13 +17,18 @@ from textual.theme import Theme
 from textual.widgets import Button, Collapsible, Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
+from core.config import setting_int
 from core.tools.registry import tool_source
+from core.session import is_agents_message
 
 try:
-    from core.mcp_client import mcp_status
+    from core.mcp_client import mcp_status, mcp_messages
 except ImportError:  # 未安装 mcp 包时界面仍可正常使用
     def mcp_status():
         return {}
+
+    def mcp_messages():
+        return []
 
 from .base import ChatPresenter, ChatView
 
@@ -52,15 +58,21 @@ FAGENT_THEME = Theme(
 )
 
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-CONTEXT_WARNING_PERCENT = 70
+DEFAULT_WARNING_PERCENT = 70
+MCP_REFRESH_INTERVAL = 0.5
 
 # 命令面板与 /help 共用的命令清单
 COMMANDS = (
     ("/help", "显示帮助"),
-    ("/tools", "列出可用工具"),
+    ("/tools", "列出可用工具与 MCP 状态"),
+    ("/status", "查看会话与上下文状态"),
+    ("/new", "新建会话（自动保存当前会话）"),
+    ("/resume", "恢复历史会话"),
+    ("/save", "保存当前会话"),
+    ("/sessions", "列出历史会话"),
     ("/compact", "压缩上下文"),
     ("/retry", "重发上一条提问"),
-    ("/clear", "清空会话"),
+    ("/clear", "清空当前会话"),
     ("/quit", "退出程序"),
 )
 
@@ -237,6 +249,11 @@ class AssistantMessage(Vertical):
         if self._final.is_mounted:
             self._render_final()
 
+    def set_text(self, text):
+        """直接写入完整回答（恢复历史会话时使用）。"""
+        self._buffer = text or ""
+        self.finish()
+
     def on_mount(self):
         # 结束事件可能早于组件挂载，此时补渲染
         if self._finished:
@@ -279,7 +296,11 @@ class ToolMessage(Collapsible):
         self.title = f"{mark} {self._tool_name}{self._summary()} · {seconds:.2f}s"
         self.add_class("failed" if failed else "done")
         self._body.update(self._detail(result))
-        self.collapsed = result.count("\n") > 8 or len(result) > 600
+        collapse_lines = setting_int("ui.tool_collapse_lines", 8)
+        collapse_chars = setting_int("ui.tool_collapse_chars", 600)
+        self.collapsed = (
+            result.count("\n") > collapse_lines or len(result) > collapse_chars
+        )
 
     def full_text(self):
         """工具名、参数与完整输出，供复制 / 全屏查看。"""
@@ -403,6 +424,54 @@ class CompactionScreen(ModalScreen):
     def on_button_pressed(self, event):
         if event.button.id == "compact-close":
             self.dismiss()
+
+
+class SessionListScreen(ModalScreen):
+    """历史会话选择面板：↑/↓ 选择，Enter 恢复，Esc 取消。"""
+
+    BINDINGS = [Binding("escape", "cancel", "取消", priority=True)]
+
+    def __init__(self, sessions):
+        super().__init__()
+        self._sessions = list(sessions)
+        self._list = OptionList()
+
+    def compose(self):
+        title = Text()
+        title.append("恢复会话", style=f"bold {ACCENT}")
+        title.append(f"  共 {len(self._sessions)} 个历史会话", style=MUTED)
+
+        for info in self._sessions:
+            label = Text()
+            label.append(f"{info.id}  ", style=f"bold {TEXT}")
+            label.append(info.title, style=TEXT)
+            label.append(
+                f"  ·  {info.message_count} 条  ·  {info.updated_at}",
+                style=MUTED,
+            )
+            self._list.add_option(Option(label))
+
+        yield Vertical(
+            Static(title, id="session-title"),
+            self._list,
+            Static("↑ ↓ 选择   ·   Enter 恢复   ·   Esc 取消", id="session-footer"),
+            id="session-box",
+        )
+
+    def on_mount(self):
+        if self._sessions:
+            self._list.highlighted = 0
+        self._list.focus()
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+    def on_option_list_option_selected(self, event):
+        index = event.option_index
+        if 0 <= index < len(self._sessions):
+            self.dismiss(self._sessions[index].id)
+        else:
+            self.dismiss(None)
 
 
 class ErrorMessage(Static):
@@ -942,6 +1011,36 @@ class FAgentApp(App, ChatView):
         align-horizontal: right;
         padding: 0 1;
     }
+
+    SessionListScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #session-box {
+        width: 90%;
+        max-width: 120;
+        height: auto;
+        max-height: 24;
+        padding: 1 1;
+        border: round $primary;
+        background: $surface;
+    }
+    #session-title {
+        height: auto;
+        padding: 0 1;
+        background: $surface;
+    }
+    #session-box > OptionList {
+        height: auto;
+        max-height: 16;
+        margin: 1 0;
+        background: $background;
+    }
+    #session-footer {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
     """
 
     BINDINGS = [
@@ -975,6 +1074,9 @@ class FAgentApp(App, ChatView):
         self._completion_suppress = False
         self._spinner_timer = None
         self._spinner_frame = 0
+        self._sidebar_signature = ()
+        self._mcp_timer = None
+        self._sidebar_generation = 0
         self._welcome = None
         self._turn = None
         self._rounds = 0
@@ -1002,8 +1104,7 @@ class FAgentApp(App, ChatView):
             servers.setdefault(server, [])
         return local, servers
 
-    @staticmethod
-    def _mcp_group_title(server, info, count):
+    def _mcp_group_title(self, server, info, count, names=None):
         """侧栏里的 MCP Server 标题：名称 + 连接状态 + 工具数。"""
         label = Text()
         label.append("MCP · ", style=MUTED)
@@ -1016,42 +1117,103 @@ class FAgentApp(App, ChatView):
             label.append("  ●", style=GREEN)
         elif state == "error":
             label.append("  ✕", style=RED)
+        elif state == "connecting":
+            label.append("  …", style=MUTED)
         else:
             label.append("  ·", style=MUTED)
         if count:
             label.append(f" {count}", style=MUTED)
+        if state == "connecting":
+            label.append("  连接中", style=MUTED)
         return Static(label, classes="group")
 
-    def compose(self) -> ComposeResult:
+    def _meta_content(self):
         agent = self._presenter.agent
-        tools = agent.tool_names
+        meta = Text()
+        meta.append(agent.config.model_name, style=TEXT)
+        meta.append(f"  ·  {len(agent.tool_names)} 个工具", style=MUTED)
+        return meta
 
+    def _tool_signature(self):
+        """工具清单与 MCP 状态的指纹，用于判断侧栏是否需要刷新。"""
+        status = mcp_status()
+        status_signature = tuple(
+            sorted(
+                (name, info.get("state"), info.get("tool_count"))
+                for name, info in status.items()
+            )
+        )
+        return (tuple(self._presenter.agent.tool_names), status_signature)
+
+    def _build_tool_widgets(self, generation=0):
+        """构建侧栏「工具 / MCP 服务」区域的全部控件。"""
+        widgets = [Static("工具", classes="section")]
+        local, servers = self._tool_groups()
+        status = mcp_status()
+        rows = {}
+        counter = 0
+        if local:
+            widgets.append(Static(f"本地 · {len(local)}", classes="group"))
+        for name in local:
+            counter += 1
+            row = Static(
+                f"· {name}", classes="tool", id=f"tool-{generation}-{counter}"
+            )
+            rows[name] = row
+            widgets.append(row)
+        if servers:
+            widgets.append(Static("MCP 服务", classes="section"))
+        for server, names in servers.items():
+            info = status.get(server)
+            widgets.append(self._mcp_group_title(server, info, len(names)))
+            for name in names:
+                counter += 1
+                row = Static(
+                    f"· {name}", classes="tool", id=f"tool-{generation}-{counter}"
+                )
+                rows[name] = row
+                widgets.append(row)
+            if (info or {}).get("state") == "error":
+                detail = (info or {}).get("detail") or "连接失败"
+                text = Text()
+                text.append("  ✕ ", style=RED)
+                text.append(detail[:60], style=MUTED)
+                widgets.append(Static(text, classes="tool"))
+        if not local and not servers:
+            widgets.append(Static("（暂无可用工具）", classes="tool"))
+        return widgets, rows
+
+    def _refresh_tools(self, force=False):
+        """按最新工具 / MCP 状态重建侧栏区域（MCP 异步加载完成后自动触发）。"""
+        try:
+            container = self.query_one("#sidebar-tools", Vertical)
+        except NoMatches:
+            return
+        signature = self._tool_signature()
+        if not force and signature == self._sidebar_signature:
+            return
+        self._sidebar_signature = signature
+        self._sidebar_generation += 1
+        widgets, rows = self._build_tool_widgets(self._sidebar_generation)
+        self._tool_rows = rows
+        container.remove_children()
+        container.mount(*widgets)
+        try:
+            self.query_one("#meta", Static).update(self._meta_content())
+        except NoMatches:
+            pass
+        if self._running_tool:
+            row = self._tool_rows.get(self._running_tool)
+            if row is not None:
+                row.add_class("running")
+
+    def compose(self) -> ComposeResult:
         brand = Text()
         brand.append("◆ ", style=ACCENT)
         brand.append("FAgent", style=f"bold {TEXT}")
 
-        meta = Text()
-        meta.append(agent.config.model_name, style=TEXT)
-        meta.append(f"  ·  {len(tools)} 个工具", style=MUTED)
-
-        sidebar = [Static("工具", classes="section")]
-        local_tools, mcp_servers = self._tool_groups()
-        status = mcp_status()
-        if local_tools:
-            sidebar.append(Static(f"本地 · {len(local_tools)}", classes="group"))
-        for name in local_tools:
-            row = Static(f"· {name}", classes="tool", id=f"tool-{name}")
-            self._tool_rows[name] = row
-            sidebar.append(row)
-        for server, names in mcp_servers.items():
-            sidebar.append(
-                self._mcp_group_title(server, status.get(server), len(names))
-            )
-            for name in names:
-                row = Static(f"· {name}", classes="tool", id=f"tool-{name}")
-                self._tool_rows[name] = row
-                sidebar.append(row)
-        sidebar += [
+        sidebar = [
+            Vertical(id="sidebar-tools"),
             Static("会话", classes="section"),
             Static(self._session_text(), id="session"),
             Static("快捷键", classes="section"),
@@ -1077,7 +1239,7 @@ class FAgentApp(App, ChatView):
                     self._context_content(self._presenter.agent.context_stats()),
                     id="context",
                 ),
-                Static(meta, id="meta"),
+                Static(self._meta_content(), id="meta"),
                 id="topbar",
             ),
             Horizontal(
@@ -1107,10 +1269,21 @@ class FAgentApp(App, ChatView):
 
     def on_mount(self):
         self.theme = "fagent"
+        config = self._presenter.agent.config
+        try:
+            self.query_one("#sidebar").styles.width = config.get_int(
+                "ui.sidebar_width", 28
+            )
+        except NoMatches:
+            pass
         self._apply_sidebar()
+        self._refresh_tools(force=True)
+        self._mcp_timer = self.set_interval(MCP_REFRESH_INTERVAL, self._refresh_tools)
         self._update_status()
         self._presenter.start()
         input_widget = self.query_one("#input", HistoryTextArea)
+        input_widget.MAX_LINES = config.get_int("ui.input_max_lines", 8)
+        input_widget.sync_height()
         input_widget.completion_handler = self._handle_completion_key
         input_widget.focus()
         self.call_after_refresh(self._center_welcome)
@@ -1136,7 +1309,10 @@ class FAgentApp(App, ChatView):
             sidebar = self.query_one("#sidebar")
         except NoMatches:
             return
-        sidebar.display = not self._sidebar_hidden and self.size.width >= 100
+        min_width = self._presenter.agent.config.get_int(
+            "ui.sidebar_min_width", 100
+        )
+        sidebar.display = not self._sidebar_hidden and self.size.width >= min_width
 
     def action_toggle_sidebar(self):
         self._sidebar_hidden = not self._sidebar_hidden
@@ -1264,10 +1440,12 @@ class FAgentApp(App, ChatView):
             prefix = directory.rstrip("/") + "/"
 
         matches = []
+        scan_limit = setting_int("ui.file_completion_limit", 3000)
+        item_limit = setting_int("ui.file_completion_items", 8)
         try:
             with os.scandir(root) as entries:
                 for count, entry in enumerate(entries):
-                    if count >= 3000:
+                    if count >= scan_limit:
                         break
                     name = entry.name
                     if name.startswith(".") and not base.startswith("."):
@@ -1286,7 +1464,7 @@ class FAgentApp(App, ChatView):
 
         matches.sort()
         result = []
-        for _, _, name, is_dir in matches[:8]:
+        for _, _, name, is_dir in matches[:item_limit]:
             insert = f"@{prefix}{name}{'/' if is_dir else ''}"
             label = Text.assemble(
                 ("◍ " if is_dir else "· ", MUTED),
@@ -1329,7 +1507,13 @@ class FAgentApp(App, ChatView):
     # ---------------------------------------------------------------- 会话信息
     def _session_text(self):
         elapsed = "—" if self._elapsed is None else f"{self._elapsed:.1f}s"
-        return f"轮次  {self._rounds}\n耗时  {elapsed}\n状态  {self._state}"
+        session_id = self._presenter.session_id or "—"
+        return (
+            f"会话  {session_id}\n"
+            f"轮次  {self._rounds}\n"
+            f"耗时  {elapsed}\n"
+            f"状态  {self._state}"
+        )
 
     def _update_session(self):
         try:
@@ -1411,23 +1595,47 @@ class FAgentApp(App, ChatView):
 
         if not text:
             return
-        if text in ("/quit", "/exit"):
+        lowered = text.lower()
+        if lowered in ("/quit", "/exit"):
+            self._presenter.auto_save()
             self.exit()
             return
-        if text == "/clear":
+        if lowered == "/clear":
             self._presenter.clear()
             input_widget.focus()
             return
-        if text == "/help":
+        if lowered == "/new":
+            self._presenter.new_session()
+            input_widget.focus()
+            return
+        if lowered == "/save":
+            self._presenter.save()
+            input_widget.focus()
+            return
+        if lowered == "/sessions":
+            self._append(NoticeMessage(self._sessions_text()))
+            input_widget.focus()
+            return
+        if lowered == "/resume":
+            self._open_session_list()
+            input_widget.focus()
+            return
+        if lowered == "/status":
+            self._append(NoticeMessage(self._status_text()))
+            input_widget.focus()
+            return
+        if lowered == "/help":
             self._append(NoticeMessage(self._help_text()))
+            input_widget.focus()
             return
-        if text == "/tools":
+        if lowered == "/tools":
             self._append(NoticeMessage(self._tools_text()))
+            input_widget.focus()
             return
-        if text == "/compact":
+        if lowered == "/compact":
             self._compact()
             return
-        if text == "/retry":
+        if lowered == "/retry":
             if self._last_prompt:
                 self._submit(self._last_prompt)
             else:
@@ -1439,13 +1647,72 @@ class FAgentApp(App, ChatView):
 
         self._submit(text)
 
+    def _open_session_list(self):
+        """打开历史会话面板；选中后恢复会话，Esc 取消。"""
+        if self._presenter.busy:
+            return
+        sessions = self._presenter.list_sessions()
+        if not sessions:
+            self._append(NoticeMessage("暂无历史会话，先用 /save 保存当前会话。"))
+            return
+
+        def restore(session_id):
+            if session_id:
+                self._presenter.resume(session_id)
+            try:
+                self.query_one("#input", HistoryTextArea).focus()
+            except NoMatches:
+                pass
+
+        self.push_screen(SessionListScreen(sessions), restore)
+
+    def _sessions_text(self):
+        sessions = self._presenter.list_sessions()
+        if not sessions:
+            return "暂无历史会话，先用 /save 保存当前会话。"
+        content = Text()
+        content.append(f"历史会话（{len(sessions)}）\n", style=ACCENT)
+        for info in sessions:
+            current = " ← 当前" if info.id == self._presenter.session_id else ""
+            content.append(f"  {info.id}", style=f"bold {TEXT}")
+            content.append(
+                f"  {info.title}  ·  {info.message_count} 条  ·  "
+                f"{info.updated_at}{current}\n",
+                style=MUTED,
+            )
+        content.append("使用 /resume 打开选择面板恢复会话。", style=MUTED)
+        return content
+
+    def _status_text(self):
+        stats = self._presenter.agent.context_stats()
+        content = Text()
+        content.append("会话  ", style=MUTED)
+        content.append(f"{self._presenter.session_id or '—'}\n", style=TEXT)
+        content.append("模型  ", style=MUTED)
+        content.append(f"{self._presenter.agent.config.model_name}\n", style=TEXT)
+        content.append("上下文  ", style=MUTED)
+        content.append(
+            f"{stats['tokens'] / 1000:.1f}k / {stats['window'] / 1000:.0f}k"
+            f"  {stats['ratio'] * 100:.0f}%\n",
+            style=TEXT,
+        )
+        content.append("轮次  ", style=MUTED)
+        content.append(f"{self._rounds}\n", style=TEXT)
+        mcp = mcp_status()
+        if mcp:
+            content.append("MCP  ", style=MUTED)
+            connected = sum(1 for info in mcp.values() if info.get("state") == "connected")
+            content.append(f"{connected}/{len(mcp)} 已连接\n", style=TEXT)
+        return content
+
     def _submit(self, text):
         if self._presenter.busy:
             return
         if self._presenter.agent.needs_compact():
+            percent = self._warning_percent_value()
             self._append(
                 WarningMessage(
-                    "上下文占用已达 70%，请先执行 /compact 压缩上下文后再继续提问。"
+                    f"上下文占用已达 {percent:.0f}%，请先执行 /compact 压缩上下文后再继续提问。"
                 )
             )
             self._set_state("等待压缩")
@@ -1474,8 +1741,9 @@ class FAgentApp(App, ChatView):
 
     def _help_text(self):
         return (
-            "命令：/help 帮助 · /tools 工具说明 · /compact 压缩上下文 · "
-            "/retry 重发上一条 · /clear 清空会话 · /quit 退出\n"
+            "命令：/help 帮助 · /tools 工具说明 · /status 会话状态 · "
+            "/new 新建会话 · /resume 恢复会话 · /save 保存会话 · /sessions 历史列表 · "
+            "/compact 压缩上下文 · /retry 重发上一条 · /clear 清空会话 · /quit 退出\n"
             "输入 / 弹出命令面板，输入 @ 补全文件路径，Tab 应用候选，↑↓ 选择候选。\n"
             "快捷键：Enter 发送 · Shift+Enter 换行（Ctrl+J 同样可用）· "
             "Esc 停止回答 · Ctrl+T 展开/折叠工具结果 · Ctrl+Y 复制工具结果 · "
@@ -1513,15 +1781,93 @@ class FAgentApp(App, ChatView):
             elif info.get("state") == "error":
                 content.append("  ✕ 未连接\n", style=RED)
                 content.append(f"    {info.get('detail', '')}\n", style=MUTED)
+            elif info.get("state") == "connecting":
+                content.append("  … 正在连接\n", style=MUTED)
             else:
                 content.append(f"  · {len(names)} 个工具\n", style=MUTED)
             for name in names:
                 add_tool(name)
+        messages = [m for m in mcp_messages() if m.startswith("错误")]
+        if messages:
+            content.append("\n最近错误\n", style=ACCENT)
+            for message in messages[-5:]:
+                content.append(f"  {message}\n", style=MUTED)
         return content
 
     def action_clear(self):
         self._presenter.clear()
         self.query_one("#input", HistoryTextArea).focus()
+
+    def action_quit(self):
+        self._presenter.auto_save()
+        self.exit()
+
+    def show_history(self, messages):
+        """把恢复的会话历史按原顺序重新渲染到聊天区。"""
+        def apply():
+            chat = self.query_one("#chat", VerticalScroll)
+            self._drop_thinking()
+            self._answer = None
+            self._tool = None
+            self._turn = None
+            self._last_tool_message = None
+            self._welcome = None
+            self._rounds = 0
+            self._elapsed = None
+            self._started_at = None
+            chat.remove_children()
+
+            calls = {}
+            rendered = False
+            for message in messages:
+                if is_agents_message(message):
+                    continue
+                role = message.get("role")
+                content = message.get("content") or ""
+                if role == "user":
+                    self._rounds += 1
+                    self._last_prompt = content
+                    widget = UserMessage(content)
+                    widget.add_class("message")
+                    self._append(widget)
+                    rendered = True
+                elif role == "assistant":
+                    for call in message.get("tool_calls") or []:
+                        function = call.get("function") or {}
+                        raw = function.get("arguments")
+                        try:
+                            args = json.loads(raw) if isinstance(raw, str) and raw else {}
+                        except (TypeError, json.JSONDecodeError):
+                            args = {}
+                        calls[call.get("id")] = (function.get("name") or "tool", args)
+                    if content:
+                        answer = AssistantMessage()
+                        answer.add_class("message")
+                        self._append(answer)
+                        answer.set_text(content)
+                        rendered = True
+                elif role == "tool":
+                    name, args = calls.get(
+                        message.get("tool_call_id"), ("tool", {})
+                    )
+                    widget = ToolMessage(name, args)
+                    widget.add_class("message")
+                    self._append(widget)
+                    widget.finish(str(content), 0.0)
+                    self._last_tool_message = widget
+                    rendered = True
+
+            if not rendered:
+                self._welcome = WelcomeMessage(
+                    self._presenter.agent.tool_names,
+                    self._presenter.agent.config.model_name,
+                )
+                self._welcome.add_class("message")
+                self._append(self._welcome)
+            self._set_state("会话已恢复")
+            self.call_after_refresh(chat.scroll_end, animate=False)
+
+        self._ui(apply)
 
     # ---------------------------------------------------------------- 渲染
 
@@ -1563,15 +1909,21 @@ class FAgentApp(App, ChatView):
         self.query_one("#status", Static).update(" · ".join(parts))
         self._update_session()
 
-    @staticmethod
-    def _context_content(stats):
+    def _warning_percent_value(self):
+        ratio = self._presenter.agent.config.get_float(
+            "context.warning_ratio", DEFAULT_WARNING_PERCENT / 100
+        )
+        return ratio * 100
+
+    def _context_content(self, stats):
         """顶栏上下文用量：已用 k / 窗口 k · 百分比；窗口未知时标注「默认」。"""
         used = stats["tokens"] / 1000
         window = stats["window"] / 1000
         percent = stats["ratio"] * 100
+        warning = self._warning_percent_value()
         if percent < 50:
             color = GREEN
-        elif percent < CONTEXT_WARNING_PERCENT:
+        elif percent < warning:
             color = WARNING
         else:
             color = RED
@@ -1603,9 +1955,11 @@ class FAgentApp(App, ChatView):
                 return
             widget.update(self._context_content(stats))
             percent = stats["ratio"] * 100
+            warning = self._warning_percent_value()
             widget.set_class(percent < 50, "ok")
-            widget.set_class(50 <= percent < CONTEXT_WARNING_PERCENT, "warn")
-            widget.set_class(percent >= CONTEXT_WARNING_PERCENT, "danger")
+            widget.set_class(50 <= percent < warning, "warn")
+            widget.set_class(percent >= warning, "danger")
+            self._update_status()
 
         self._ui(apply)
 
@@ -1782,6 +2136,7 @@ class FAgentApp(App, ChatView):
             self._rounds = 0
             self._elapsed = None
             self._started_at = None
+            self._last_prompt = ""
             self._welcome = WelcomeMessage(
                 self._presenter.agent.tool_names,
                 self._presenter.agent.config.model_name,

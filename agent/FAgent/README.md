@@ -9,14 +9,15 @@
 ```text
 FAgent/
 ├── main.py                  # 组合根：加载配置、装配 Agent 与界面、解析启动参数
-├── config.ini               # API 配置（不纳入版本控制）
+├── config.ini               # API 与运行参数配置（不存在时首次启动自动生成，不纳入版本控制）
 ├── core/                    # 核心层：纯业务逻辑，不依赖任何 UI
 │   ├── __init__.py          # 对外统一出口
-│   ├── config.py            # 配置模型、解析与校验
-│   ├── agent.py             # 会话历史、模型调用、工具调用循环、上下文压缩
+│   ├── config.py            # 配置模型、默认值、模板生成与校验
+│   ├── agent.py             # 会话历史、模型调用、工具调用循环、上下文压缩、AGENTS.md 注入
 │   ├── context.py           # Token 估算、上下文窗口、JSONL 归档与历史检索
+│   ├── session.py           # 会话事件日志：保存 / 列举 / 恢复会话，读取 AGENTS.md
 │   ├── skills.py            # 技能目录扫描、frontmatter 解析与系统提示生成
-│   ├── mcp_client.py        # MCP Client：读取 .mcp.json、连接外部 MCP Server、注册并转发 MCP 工具
+│   ├── mcp_client.py        # MCP Client：读取 .mcp.json、异步连接外部 MCP Server、注册并转发 MCP 工具
 │   └── tools/               # 工具业务模块
 │       ├── __init__.py      # 注册编排 + 公共 API
 │       ├── registry.py      # @tool 注册、参数校验、异常兜底、统一分发
@@ -29,11 +30,13 @@ FAgent/
 │       └── recall.py        # recallContext：在上下文压缩归档中检索历史信息
 ├── .agents/skills/          # 技能目录（Agent Skills 规范，可选，按需创建），每个技能一个目录（SKILL.md + references）
 ├── .agents/context/         # 上下文压缩归档目录（每次 /compact 生成一个 jsonl 文件）
+├── .agents/sessions/        # 会话事件日志目录（/save、/new 与自动保存生成 jsonl 文件）
 └── tui/                     # 展示层：交互与渲染
     ├── __init__.py
-    ├── base.py              # ChatView 契约 + ChatPresenter 共享控制器
+    ├── base.py              # ChatView 契约 + ChatPresenter 共享控制器（含会话管理）
     ├── console.py           # 命令行界面适配器
     ├── app.py               # Textual TUI
+    ├── notice.py            # 首次配置 / mock 配置提示对话框
     └── factory.py           # 界面注册与延迟加载
 ```
 
@@ -67,25 +70,87 @@ pip install openai textual trafilatura mcp
 
 ## 配置
 
-`config.ini` 按以下顺序定位，取第一个存在的文件：
+`config.ini` 固定读取**程序启动时的工作目录**（与 `main.py` 所在位置无关），便于每个项目使用独立配置。
 
-1. **项目根目录**：程序启动时的工作目录下的 `config.ini`（推荐）
-2. **脚本目录**：`main.py` 所在的 `FAgent/` 目录（兼容旧用法）
+首次启动时若当前目录没有 `config.ini`：
+
+1. 自动生成一份包含全部配置项、带 mock 占位信息（如 `sk-mock-...`）的完整模板；
+2. 弹出配置提示对话框（TUI），或打印提示（console）；
+3. 用户修改 `base_url`、`model_name`、`key` 等后重新启动，程序才能正常工作。
+
+如果 `key` 仍是 mock 占位值，启动时同样会弹出提示并退出，避免带着无效配置进入界面。
+
+`config.ini` 只需写需要覆盖的配置，未写的键自动使用内置默认值：
 
 ```ini
 base_url=https://api.deepseek.com
-model_name=deepseek-flash
+model_name=deepseek-chat
 key=你的API密钥
+
+[context]
+window=0
+warning_ratio=0.7
+preview_chars=200000
+max_recall_snippets=12
+max_recall_chars=6000
+snippet_radius=160
+
+[mcp]
+connect_timeout=60
+call_timeout=120
+probe_timeout=5
+close_timeout=10
+
+[filesystem]
+max_list_entries=500
+max_read_chars=20000
+
+[web]
+max_chars=20000
+timeout=20
+connect_timeout=10
+search_endpoint=https://qianfan.baidubce.com/v2/ai_search/web_search
+search_timeout=20
+search_default_top_k=10
+search_max_top_k=50
+search_snippet_chars=500
 
 [search]
 baidu_api_key=你的百度千帆API Key
+
+[cli]
+default_timeout=60
+max_timeout=600
+max_output_chars=20000
+
+[system]
+date_timeout=5
+
+[session]
+directory=.agents/sessions
+auto_save=true
+
+[agents]
+enabled=true
+file=AGENTS.md
+max_chars=200000
+
+[ui]
+sidebar_width=28
+sidebar_min_width=100
+input_max_lines=8
+file_completion_limit=3000
+file_completion_items=8
+tool_collapse_lines=8
+tool_collapse_chars=600
 ```
 
-- 支持 `#` 开头的注释行、空行与 `[section]` 小节
+- 支持 `#` 开头的注释行、空行与 `[section]` 小节；默认小节的键保持原名，其余小节的键为 `section.key`
 - `base_url`、`model_name`、`key` 任一缺失时，程序打印错误并以退出码 1 结束
+- 所有超时、条数上限、上下文窗口、告警比例、会话目录、AGENTS.md 与侧栏尺寸等参数均来自 `config.ini` + 内置默认值，不再硬编码
 - `searchWeb` 使用 `[search]` 小节的 `baidu_api_key` 调用百度千帆搜索 API；缺失时工具会向模型返回明确的错误信息
 - `config.ini` 已被 `.gitignore` 忽略，请勿提交真实密钥
-- 与 `.mcp.json`、`.agents/skills/` 一样以启动时的工作目录为项目根，便于每个项目使用独立配置
+- 与 `.mcp.json`、`.agents/` 一样以启动时的工作目录为项目根
 
 ## 运行
 
@@ -108,7 +173,7 @@ python main.py --help
 | `Shift+Enter` | 在输入框内换行（终端不支持时可改用 `Ctrl+J`） |
 | 直接粘贴 | 多行文本原样插入，输入框随内容自动增高（最多 8 行） |
 | `↑` / `↓` | 补全面板可见时选择候选项；否则在首行 / 末行回溯历史提问，多行文本内按行移动光标 |
-| `/` | 弹出命令面板，继续输入可过滤，`Tab` 补全选中命令 |
+| `/` | 弹出命令补全引导面板，继续输入可过滤，`↑` / `↓` 选择，`Tab` 补全 |
 | `@` | 补全当前目录下的文件 / 目录路径，`Tab` 补全；仅插入路径，读取文件仍由模型调用 `readFile` |
 | `Tab` | 补全面板可见时应用当前候选；目录补全会继续列出下一级内容 |
 | `Ctrl+T` | 展开 / 折叠最近一次工具结果 |
@@ -116,24 +181,57 @@ python main.py --help
 | `Ctrl+O` | 全屏查看工具结果，`PgUp` / `PgDn` 翻页，`c` 复制，`Esc` 关闭 |
 | `Esc` | 取消当前请求，保留已生成的片段；补全面板可见时先关闭面板 |
 | `/help` | 查看命令与快捷键 |
-| `/tools` | 查看全部工具及用途 |
+| `/tools` | 查看全部工具、MCP Server 连接状态与失败原因 |
+| `/status` | 查看当前会话编号、模型、上下文用量、轮次与 MCP 连接数 |
+| `/new` | 新建会话：先自动保存当前会话历史，再开始全新会话 |
+| `/resume` | 打开历史会话面板：`↑` / `↓` 选择，`Enter` 恢复，`Esc` 取消 |
+| `/save` | 保存当前会话到 `.agents/sessions/` |
+| `/sessions` | 以列表形式查看历史会话 |
 | `/compact` | 归档并压缩当前上下文，弹出压缩前后对照面板 |
 | `/retry` | 重发上一条提问 |
-| `/clear` 或 `Ctrl+L` | 清空界面与会话历史 |
-| `/quit` 或 `Ctrl+Q` | 退出程序 |
-| `Ctrl+B` | 显示/隐藏右侧栏（终端窄于 100 列时自动隐藏） |
+| `/clear` 或 `Ctrl+L` | 清空界面与会话历史（不新建会话文件） |
+| `/quit` 或 `Ctrl+Q` | 退出程序（按 `session.auto_save` 自动保存当前会话） |
+| `Ctrl+B` | 显示/隐藏右侧栏（终端窄于 `ui.sidebar_min_width` 时自动隐藏） |
 
 界面参考 opencode 的极简风格：启动时显示居中的 FAGENT 字标、模型 / 目录 / 工具信息卡，
 随后消息流以限宽居中的方式滚动，底部是带提示符的输入框与状态栏（模型、轮次、耗时、当前状态）。
 消息按轮次分组：每条提问下的思考提示、工具调用与回答收拢在同一个容器中并整体缩进，轮次结束补一行
-「本轮 · 工具数 · 耗时」摘要；右侧栏按来源展示工具（本地工具与各 MCP Server 分组，Server 标题带
-连接状态点，执行中的工具带 spinner 高亮），同时展示轮次 / 耗时 / 状态与快捷键，`/tools` 会列出
-MCP Server 的连接结果与失败原因。
+「本轮 · 工具数 · 耗时」摘要；右侧栏按来源展示工具：本地工具一组，「MCP 服务」区域按 Server
+分组显示连接状态点（连接中 `…` / 已连接 `●` / 失败 `✕`）与该服务器已注册的工具数、工具名，
+失败时直接显示原因。MCP 采用后台异步加载：TUI 先进入界面，连接完成的 Server 会在 0.5 秒内自动
+刷新到侧栏（工具清单与顶栏工具数同步更新），不会阻塞启动。侧栏同时展示当前会话编号、轮次 / 耗时 /
+状态与快捷键，`/tools` 会列出 MCP Server 的连接结果与失败原因。
 模型请求在后台线程中执行，不会阻塞界面；回答逐字流式显示并带光标，思考期间行内展示 spinner，
 工具执行时以单行消息显示 spinner 与参数，完成后显示耗时与可折叠结果，回答结束后自动转为 Markdown 渲染。
 输入 `/` 或 `@` 会在输入框上方弹出补全面板，支持键盘上下选择与 `Tab` 补全；最近一次工具结果可用
 `Ctrl+T` 展开 / 折叠、`Ctrl+Y` 复制、`Ctrl+O` 全屏分页查看。
 配色使用内置的自定义深色主题（近黑背景 + 暖橙强调色），终端宽度不足时自动精简提示栏、字标与右侧栏。
+
+## 会话管理
+
+每个会话对应 `<项目根>/.agents/sessions/<会话编号>.jsonl`，采用事件日志格式：
+第一行是 meta（编号、标题、创建 / 更新时间、模型），之后按顺序记录消息事件与 AGENTS.md 注入事件。
+
+| 命令 | 行为 |
+| --- | --- |
+| `/new` | 先把当前会话历史写入事件日志，再清空上下文开始全新会话（新编号） |
+| `/resume` | 打开历史会话面板，`↑` / `↓` 选择、`Enter` 恢复、`Esc` 取消；恢复后消息按原顺序重新渲染 |
+| `/save` | 立即保存当前会话，提示文件路径 |
+| `/sessions` | 列出全部历史会话（编号、标题、消息数、更新时间） |
+| `/quit` | 退出前按 `[session] auto_save` 决定是否自动保存 |
+
+每轮回答结束后，若 `session.auto_save=true`，也会静默更新当前会话文件。会话目录可用
+`[session] directory` 改为绝对路径或其他相对项目根的目录。
+
+## 项目规范 AGENTS.md
+
+支持在项目根放置 `AGENTS.md`（文件名可通过 `[agents] file` 修改，`enabled=false` 可关闭）。
+采用「一次注入，全程复用」策略：
+
+- 会话首次加载时读取 `AGENTS.md`，包装成一条消息追加到聊天历史，并立即写入会话事件日志；
+- 恢复已有会话时，若历史中已包含该注入消息则直接复用，不重复读取文件；
+- 注入消息固定保留在历史最前面，后续轮次不再变更，从而保持系统提示与历史前缀稳定，提升缓存命中率；
+- 注入消息不会出现在聊天气泡中，只在启动 / 恢复时给出一行提示。
 
 ## 工具列表（本地共 18 个，另有 MCP 动态注册的工具）
 
@@ -142,18 +240,18 @@ MCP Server 的连接结果与失败原因。
 | `getDate` | 无 | 获取当前日期时间（仅 Windows） |
 | `isLeapYear` | `year` | 判断闰年 |
 | `getCwd` | 无 | 获取当前工作目录绝对路径 |
-| `listDirectory` | `path="."`、`recursive=false` | 列出目录内容，单次最多 500 条 |
+| `listDirectory` | `path="."`、`recursive=false` | 列出目录内容，单次默认最多 500 条（`filesystem.max_list_entries`） |
 | `getFileType` | `path` | 返回目录/文本/二进制类型、MIME 与扩展名 |
-| `readFile` | `path`、`max_chars=20000` | 读取纯文本，自动识别 UTF-8/GBK，超长截断 |
+| `readFile` | `path`、`max_chars` | 读取纯文本，自动识别 UTF-8/GBK，默认 20000 字符截断（`filesystem.max_read_chars`） |
 | `createFile` | `directory="."`、`filename`、`content` | 创建文件，自动建多级目录，目标存在时不覆盖 |
 | `editFile` | `path`、`content`、`mode` | `overwrite` 覆盖 / `append` 追加，保留原编码 |
 | `createDirectory` | `path` | 创建多级目录，已存在不报错 |
 | `deleteDirectory` | `path` | 递归删除目录，带安全护栏 |
 | `deleteFile` | `path` | 删除文件 |
 | `renamePath` | `src`、`dst` | 重命名/移动，目标不可已存在 |
-| `fetchWeb` | `url`、`max_chars=20000` | 用 curl 抓取网页，经 trafilatura 提取正文并转为 Markdown |
-| `searchWeb` | `query`、`top_k=10` | 调用百度千帆搜索 API，返回结果摘要与参考来源标题、URL |
-| `RunCli` | `command`、`args`、`timeout=60` | 以当前用户权限调用本机任意 CLI，返回 stdout、stderr 与退出码，超长输出截断 |
+| `fetchWeb` | `url`、`max_chars` | 用 curl 抓取网页，经 trafilatura 提取正文并转为 Markdown（默认值见 `[web]`） |
+| `searchWeb` | `query`、`top_k` | 调用百度千帆搜索 API，返回结果摘要与参考来源标题、URL（默认 10、上限 50，见 `[web]`） |
+| `RunCli` | `command`、`args`、`timeout` | 以当前用户权限调用本机任意 CLI，返回 stdout、stderr 与退出码（默认 / 上限见 `[cli]`） |
 | `loadSkill` | `name`、`filename?` | 仅传 `name` 返回技能 SKILL.md 全文；同时传 `filename` 读取技能附件（仅限技能目录内部） |
 | `createSkill` | `name`、`skillContext` | 在 `.agents/skills/` 下创建技能目录并生成合规的 SKILL.md，已存在时不覆盖 |
 | `recallContext` | `text`、`id?` | 在 `.agents/context/` 的压缩归档中做全文关键词检索，返回片段、归档编号与消息位置 |
@@ -164,7 +262,9 @@ MCP Server 的连接结果与失败原因。
 
 FAgent 内置 MCP Client，启动时读取**当前项目目录**（程序启动时的工作目录，与 `main.py` 所在位置无关）
 下的 `.mcp.json`，按 MCP Python SDK 标准接口连接外部 MCP Server，支持 `stdio` 与
-`streamable_http`（可简写 `http`）两种协议：
+`streamable_http`（可简写 `http`）两种协议。TUI 模式下连接在后台线程中异步执行：界面先启动，
+各 Server 的状态与工具清单随连接结果实时刷新到侧栏；连接 / 调用超时由 `[mcp]` 小节的
+`connect_timeout`、`call_timeout`、`probe_timeout` 控制。
 
 ```json
 {
@@ -189,7 +289,7 @@ FAgent 内置 MCP Client，启动时读取**当前项目目录**（程序启动�
   `服务器名__工具名` 形式暴露给模型，内部维护服务器与原始工具名的映射用于转发
 - 工具调用经 `registry.run_tool` 统一分发，参数按 JSON Schema 原样透传；
   返回的文本内容、结构化数据（structuredContent）与错误（isError）都会正确拼接回传给模型
-- 单个服务器连接失败只会在启动时输出明确错误信息，不影响其他服务器与本地工具
+- 单个服务器连接失败只会记录明确的错误信息（侧栏显示原因，`/tools` 汇总），不影响其他服务器与本地工具
 - MCP 会话由后台事件循环线程持有，程序退出时自动关闭；未安装 `mcp` 包时
   检测到 `.mcp.json` 会提示安装，不影响程序正常启动
 
@@ -232,7 +332,7 @@ FAgent 内置 MCP Client，启动时读取**当前项目目录**（程序启动�
 API 返回的 usage，取不到时按字符数估算），TUI 顶栏持续显示「已用 k / 窗口 k · 百分比」；
 模型窗口未知时按 128k 处理并标注「默认」。
 
-- 占用达到 70% 时界面给出警告，并暂停接受新的普通提问，直到压缩成功；
+- 占用达到告警阈值（默认 70%，由 `context.warning_ratio` 配置）时界面给出警告，并暂停接受新的普通提问，直到压缩成功；
 - 输入 `/compact` 手动压缩：先把完整上下文（System Prompt、对话、工具调用参数与结果）
   按顺序写入 `.agents/context/<编号>.jsonl`，归档成功后才调用 LLM 生成约 5000 tokens 的摘要；
 - 压缩期间不提供任何工具定义，只允许这次摘要调用，原任务与工具调用均暂停；

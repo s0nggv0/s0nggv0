@@ -6,10 +6,10 @@ import subprocess
 import urllib.error
 import urllib.request
 
-from ..config import ConfigError, load_search_api_key
+from ..config import ConfigError, load_search_api_key, setting, setting_int
 from .registry import tool
 
-DEFAULT_MAX_CHARS = 20000
+DEFAULT_MAX_CHARS = 20_000
 DEFAULT_TIMEOUT = 20
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -21,6 +21,43 @@ SEARCH_TIMEOUT = 20
 SEARCH_DEFAULT_TOP_K = 10
 SEARCH_MAX_TOP_K = 50
 SEARCH_SNIPPET_CHARS = 500
+
+
+def _max_chars():
+    return setting_int("web.max_chars", DEFAULT_MAX_CHARS)
+
+
+def _fetch_timeout():
+    return setting_int("web.timeout", DEFAULT_TIMEOUT)
+
+
+def _connect_timeout(timeout):
+    configured = setting_int("web.connect_timeout", 10)
+    return min(configured, timeout) if configured > 0 else timeout
+
+
+def _user_agent():
+    return setting("web.user_agent", USER_AGENT)
+
+
+def _search_endpoint():
+    return setting("web.search_endpoint", SEARCH_ENDPOINT)
+
+
+def _search_timeout():
+    return setting_int("web.search_timeout", SEARCH_TIMEOUT)
+
+
+def _search_top_k_default():
+    return setting_int("web.search_default_top_k", SEARCH_DEFAULT_TOP_K)
+
+
+def _search_top_k_max():
+    return setting_int("web.search_max_top_k", SEARCH_MAX_TOP_K)
+
+
+def _search_snippet_chars():
+    return setting_int("web.search_snippet_chars", SEARCH_SNIPPET_CHARS)
 
 
 def _normalize_url(url):
@@ -45,11 +82,11 @@ def _fetch_html(url, timeout):
         "--max-redirs",
         "10",
         "--connect-timeout",
-        str(min(10, timeout)),
+        str(_connect_timeout(timeout)),
         "--max-time",
         str(timeout),
         "-A",
-        USER_AGENT,
+        _user_agent(),
         "--url",
         url,
     ]
@@ -108,7 +145,7 @@ def _search_request(query, top_k, api_key):
     }
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
-        SEARCH_ENDPOINT,
+        _search_endpoint(),
         data=data,
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -118,15 +155,16 @@ def _search_request(query, top_k, api_key):
         method="POST",
     )
 
+    timeout = _search_timeout()
     try:
-        with urllib.request.urlopen(request, timeout=SEARCH_TIMEOUT) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read()
     except urllib.error.HTTPError as e:
         return None, _search_http_error(e)
     except urllib.error.URLError as e:
         return None, f"Error: 无法连接搜索服务：{e.reason}"
     except TimeoutError:
-        return None, f"Error: 搜索请求超时（超过 {SEARCH_TIMEOUT} 秒）"
+        return None, f"Error: 搜索请求超时（超过 {timeout} 秒）"
     except OSError as e:
         return None, f"Error: 搜索请求失败：{e}"
 
@@ -179,6 +217,7 @@ def _format_search_results(query, references):
 
     blocks = []
     sources = []
+    snippet_chars = _search_snippet_chars()
     for index, item in enumerate(references, start=1):
         if not isinstance(item, dict):
             continue
@@ -187,8 +226,8 @@ def _format_search_results(query, references):
         content = (item.get("content") or "").strip()
         date = (item.get("date") or "").strip()
 
-        if len(content) > SEARCH_SNIPPET_CHARS:
-            content = content[:SEARCH_SNIPPET_CHARS] + "..."
+        if snippet_chars > 0 and len(content) > snippet_chars:
+            content = content[:snippet_chars] + "..."
 
         lines = [f"## {index}. {title}"]
         if content:
@@ -227,22 +266,27 @@ def _format_search_results(query, references):
             },
             "top_k": {
                 "type": "integer",
-                "description": "返回的网页结果数量，默认 10，范围 1-50",
+                "description": "返回的网页结果数量，默认值与上限由 config.ini 的 [web] 小节配置",
             },
         },
         "required": ["query"],
     },
 )
-def search_web(query, top_k=SEARCH_DEFAULT_TOP_K):
+def search_web(query, top_k=None):
     query = (query or "").strip()
     if not query:
         return "Error: 缺少参数 query"
 
-    try:
-        top_k = int(top_k)
-    except (TypeError, ValueError):
-        top_k = SEARCH_DEFAULT_TOP_K
-    top_k = max(1, min(top_k, SEARCH_MAX_TOP_K))
+    default_top_k = _search_top_k_default()
+    max_top_k = _search_top_k_max()
+    if top_k is None:
+        top_k = default_top_k
+    else:
+        try:
+            top_k = int(top_k)
+        except (TypeError, ValueError):
+            top_k = default_top_k
+    top_k = max(1, min(top_k, max_top_k))
 
     try:
         api_key = load_search_api_key()
@@ -270,25 +314,29 @@ def search_web(query, top_k=SEARCH_DEFAULT_TOP_K):
             },
             "max_chars": {
                 "type": "integer",
-                "description": "最多返回的字符数，默认 20000，超出会截断",
+                "description": "最多返回的字符数，默认由 config.ini 的 web.max_chars 配置",
             },
         },
         "required": ["url"],
     },
 )
-def fetch_web(url, max_chars=DEFAULT_MAX_CHARS):
+def fetch_web(url, max_chars=None):
     url, error = _normalize_url(url)
     if error:
         return error
 
-    try:
-        max_chars = int(max_chars)
-    except (TypeError, ValueError):
-        max_chars = DEFAULT_MAX_CHARS
+    limit = _max_chars()
+    if max_chars is None:
+        max_chars = limit
+    else:
+        try:
+            max_chars = int(max_chars)
+        except (TypeError, ValueError):
+            max_chars = limit
     if max_chars <= 0:
-        max_chars = DEFAULT_MAX_CHARS
+        max_chars = limit
 
-    html, error = _fetch_html(url, DEFAULT_TIMEOUT)
+    html, error = _fetch_html(url, _fetch_timeout())
     if error:
         return error
 

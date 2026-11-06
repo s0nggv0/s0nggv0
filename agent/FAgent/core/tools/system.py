@@ -5,6 +5,13 @@ import subprocess
 
 from .common import decode_output
 from .registry import tool
+from ..config import setting_int
+
+DATE_TIMEOUT = 5
+
+
+def _date_timeout():
+    return setting_int("system.date_timeout", DATE_TIMEOUT)
 
 
 @tool(
@@ -17,7 +24,7 @@ def get_date():
         result = subprocess.run(
             ["cmd", "/c", "date /t && time /t"],
             capture_output=True,
-            timeout=5,
+            timeout=_date_timeout(),
         )
         if result.returncode == 0:
             out = decode_output(result.stdout or b"")

@@ -23,14 +23,14 @@ description: "创建、编辑与检查 Word（.docx）、PowerPoint（.pptx）�
 ## 可执行文件
 
 ```text
-D:\xx\OfficeCli_#SULP#_26sc1d\officecli-win-x64.exe
+D:\xx\office\.agents\skills\officecli\scripts\officecli-win-x64.exe
 ```
 
 通过 `RunCli` 调用：
 
 ```text
 RunCli(
-  command = "D:\\xx\\OfficeCli_#SULP#_26sc1d\\officecli-win-x64.exe",
+  command = "D:\\xx\\office\\.agents\\skills\\officecli\\scripts\\officecli-win-x64.exe",
   args    = ["create", "deliverables/report.docx"],
   timeout = 60
 )

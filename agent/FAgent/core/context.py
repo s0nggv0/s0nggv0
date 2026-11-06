@@ -12,10 +12,11 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from .config import setting_float, setting_int
 from .skills import project_root
 
 DEFAULT_CONTEXT_WINDOW = 128_000
-CONTEXT_WARNING_RATIO = 0.7
+DEFAULT_WARNING_RATIO = 0.7
 
 # 已知模型的上下文窗口（token）。按模型名包含关系匹配，更具体的名字放在前面。
 MODEL_CONTEXT_WINDOWS = {
@@ -41,6 +42,24 @@ MAX_RECALL_SNIPPETS = 12
 MAX_RECALL_CHARS = 6000
 SNIPPET_RADIUS = 160
 
+
+def warning_ratio():
+    """上下文告警阈值，可通过 [context] warning_ratio 配置。"""
+    return setting_float("context.warning_ratio", DEFAULT_WARNING_RATIO)
+
+
+def _max_recall_snippets():
+    return setting_int("context.max_recall_snippets", MAX_RECALL_SNIPPETS)
+
+
+def _max_recall_chars():
+    return setting_int("context.max_recall_chars", MAX_RECALL_CHARS)
+
+
+def _snippet_radius():
+    return setting_int("context.snippet_radius", SNIPPET_RADIUS)
+
+
 _CJK_PATTERN = re.compile(
     r"[\u3400-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef]"
 )
@@ -53,8 +72,12 @@ class ContextError(Exception):
 def context_window_for(model_name):
     """返回 (上下文窗口 token 数, 是否为默认值)。
 
-    模型名能匹配到内置表时使用表内数值，否则回退到 128k 并标记为默认。
+    优先使用 [context] window 的显式配置；未配置（0）时按模型名匹配内置表，
+    匹配不到则回退到 128k 并标记为默认。
     """
+    override = setting_int("context.window", 0)
+    if override and override > 0:
+        return override, False
     name = (model_name or "").lower()
     for key, window in MODEL_CONTEXT_WINDOWS.items():
         if key in name:
@@ -185,13 +208,14 @@ def render_context(system_prompt, history, max_chars=None):
 
 def _snippet(text, terms):
     """截取首次命中位置附近的一段文本，避免整条消息占满上下文。"""
+    radius = _snippet_radius()
     lower = text.lower()
     positions = [lower.find(term) for term in terms]
     positions = [position for position in positions if position >= 0]
     if not positions:
-        return text[: SNIPPET_RADIUS * 2]
-    start = max(0, min(positions) - SNIPPET_RADIUS)
-    end = min(len(text), max(positions) + SNIPPET_RADIUS)
+        return text[: radius * 2]
+    start = max(0, min(positions) - radius)
+    end = min(len(text), max(positions) + radius)
     snippet = text[start:end].strip()
     return ("…" if start > 0 else "") + snippet + ("…" if end < len(text) else "")
 
@@ -225,6 +249,8 @@ def search_archives(text, archive_id=None, directory=None):
     total_chars = 0
     truncated = False
     matched_files = 0
+    max_snippets = _max_recall_snippets()
+    max_chars = _max_recall_chars()
 
     for path in archives:
         try:
@@ -250,7 +276,7 @@ def search_archives(text, archive_id=None, directory=None):
 
             total_matches += 1
             file_hit = True
-            if len(blocks) >= MAX_RECALL_SNIPPETS or total_chars >= MAX_RECALL_CHARS:
+            if len(blocks) >= max_snippets or total_chars >= max_chars:
                 truncated = True
                 continue
 

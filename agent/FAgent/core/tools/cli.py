@@ -5,10 +5,23 @@ import subprocess
 
 from .common import decode_output
 from .registry import tool
+from ..config import setting_int
 
 DEFAULT_TIMEOUT = 60
 MAX_TIMEOUT = 600
-DEFAULT_MAX_OUTPUT_CHARS = 20000
+DEFAULT_MAX_OUTPUT_CHARS = 20_000
+
+
+def _default_timeout():
+    return setting_int("cli.default_timeout", DEFAULT_TIMEOUT)
+
+
+def _max_timeout():
+    return setting_int("cli.max_timeout", MAX_TIMEOUT)
+
+
+def _max_output_chars():
+    return setting_int("cli.max_output_chars", DEFAULT_MAX_OUTPUT_CHARS)
 
 
 def _truncate(text, limit):
@@ -35,13 +48,13 @@ def _truncate(text, limit):
             },
             "timeout": {
                 "type": "integer",
-                "description": f"执行超时时间（秒），默认 {DEFAULT_TIMEOUT}，最大 {MAX_TIMEOUT}",
+                "description": "执行超时时间（秒），默认与上限由 config.ini 的 [cli] 小节配置",
             },
         },
         "required": ["command", "args"],
     },
 )
-def run_cli(command, args, timeout=DEFAULT_TIMEOUT):
+def run_cli(command, args, timeout=None):
     command = (command or "").strip() if isinstance(command, str) else ""
     if not command:
         return "Error: 缺少参数 command"
@@ -53,13 +66,18 @@ def run_cli(command, args, timeout=DEFAULT_TIMEOUT):
     if any(not isinstance(arg, str) for arg in args):
         return "Error: args 中的每一项都必须是字符串"
 
-    try:
-        timeout = int(timeout)
-    except (TypeError, ValueError):
-        timeout = DEFAULT_TIMEOUT
+    default_timeout = _default_timeout()
+    max_timeout = _max_timeout()
+    if timeout is None:
+        timeout = default_timeout
+    else:
+        try:
+            timeout = int(timeout)
+        except (TypeError, ValueError):
+            timeout = default_timeout
     if timeout <= 0:
-        timeout = DEFAULT_TIMEOUT
-    timeout = min(timeout, MAX_TIMEOUT)
+        timeout = default_timeout
+    timeout = min(timeout, max_timeout)
 
     argv = [command, *args]
 
@@ -75,8 +93,9 @@ def run_cli(command, args, timeout=DEFAULT_TIMEOUT):
             shell=False,
         )
     except subprocess.TimeoutExpired as e:
-        stdout = _truncate(decode_output(e.stdout or b""), DEFAULT_MAX_OUTPUT_CHARS)
-        stderr = _truncate(decode_output(e.stderr or b""), DEFAULT_MAX_OUTPUT_CHARS)
+        limit = _max_output_chars()
+        stdout = _truncate(decode_output(e.stdout or b""), limit)
+        stderr = _truncate(decode_output(e.stderr or b""), limit)
         return (
             f"命令：{argv}\n"
             f"退出码：超时（超过 {timeout} 秒已终止）\n"
@@ -88,8 +107,9 @@ def run_cli(command, args, timeout=DEFAULT_TIMEOUT):
     except OSError as e:
         return f"Error: 启动命令失败：{e}"
 
-    stdout = _truncate(decode_output(result.stdout or b""), DEFAULT_MAX_OUTPUT_CHARS)
-    stderr = _truncate(decode_output(result.stderr or b""), DEFAULT_MAX_OUTPUT_CHARS)
+    limit = _max_output_chars()
+    stdout = _truncate(decode_output(result.stdout or b""), limit)
+    stderr = _truncate(decode_output(result.stderr or b""), limit)
     return (
         f"命令：{argv}\n"
         f"退出码：{result.returncode}\n"

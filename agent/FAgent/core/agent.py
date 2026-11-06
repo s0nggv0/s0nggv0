@@ -2,14 +2,16 @@
 
 import json
 
+from .config import activate_config, setting_int
 from .context import (
-    CONTEXT_WARNING_RATIO,
     ContextError,
     archive_context,
     context_window_for,
     estimate_messages_tokens,
     render_context,
+    warning_ratio,
 )
+from .session import build_agents_message, is_agents_message, read_agents_guidance
 from .tools import TOOLS, run_tool
 
 # 上下文压缩专用 Prompt：把历史对话整理成约 5000 tokens 的工作摘要。
@@ -70,7 +72,7 @@ class Agent:
         tool_runner=None,
         system_prompt="",
     ):
-        self.config = config
+        self.config = activate_config(config)
         self.tools = TOOLS if tools is None else tools
         self._client = client
         self._tool_runner = tool_runner or run_tool
@@ -97,6 +99,34 @@ class Agent:
     def reset(self):
         self.history.clear()
         self._last_usage_tokens = None
+
+    def load_history(self, messages):
+        """替换为一条已保存的会话历史（恢复会话时使用）。"""
+        self.history = list(messages or [])
+        self._last_usage_tokens = None
+
+    def has_agents_guidance(self):
+        return any(is_agents_message(message) for message in self.history)
+
+    def inject_agents_guidance(self):
+        """会话首次加载时注入项目根目录的 AGENTS.md，返回注入信息或 None。
+
+        采用「一次注入，全程复用」：注入后的消息一直保留在历史最前面，
+        后续轮次不再重复读取文件，保证系统提示与历史前缀稳定、缓存有效。
+        """
+        if not self.config.get_bool("agents.enabled", True):
+            return None
+        if self.has_agents_guidance():
+            return None
+        path, text = read_agents_guidance()
+        if not text:
+            return None
+        message = build_agents_message(path, text)
+        if self.history:
+            self.history.insert(0, message)
+        else:
+            self.history.append(message)
+        return {"path": str(path), "chars": len(text)}
 
     def _messages(self):
         """系统提示不写入历史，每次请求时临时拼接。"""
@@ -253,8 +283,8 @@ class Agent:
         }
 
     def needs_compact(self):
-        """上下文占用是否已达到告警阈值（默认 70%）。"""
-        return self.context_stats()["ratio"] >= CONTEXT_WARNING_RATIO
+        """上下文占用是否已达到告警阈值（默认 70%，可由配置调整）。"""
+        return self.context_stats()["ratio"] >= warning_ratio()
 
     def render_context_text(self, max_chars=None):
         """渲染完整上下文，供压缩 Prompt 与压缩前后对照面板使用。"""
@@ -279,9 +309,12 @@ class Agent:
             )
             original = render_context(self.system_prompt, self.history)
             preview = original
-            if len(preview) > CONTEXT_PREVIEW_CHARS:
+            preview_limit = setting_int(
+                "context.preview_chars", CONTEXT_PREVIEW_CHARS
+            )
+            if preview_limit > 0 and len(preview) > preview_limit:
                 preview = (
-                    preview[:CONTEXT_PREVIEW_CHARS]
+                    preview[:preview_limit]
                     + "\n\n…（预览已截断，完整内容见归档文件）"
                 )
 

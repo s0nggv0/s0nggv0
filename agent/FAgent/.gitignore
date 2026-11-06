@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .venv/
 .agents/context/
+.agents/sessions/

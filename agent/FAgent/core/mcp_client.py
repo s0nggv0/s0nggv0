@@ -30,27 +30,49 @@ import json
 import socket
 import threading
 from contextlib import AsyncExitStack
+from pathlib import Path
 from urllib.parse import urlparse
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
+from .config import setting_int
 from .skills import project_root
 from .tools.registry import has_tool, register_dynamic_tool
 
 CONNECT_TIMEOUT = 60
 CALL_TIMEOUT = 120
+PROBE_TIMEOUT = 5
 HTTP_TYPES = {"streamable_http", "http", "streamable-http"}
 
-# 最近一次 setup_mcp 的连接结果：{server 名: {"state": "connected" | "error",
+# 最近一次 setup_mcp 的连接结果：{server 名: {"state": "connecting" | "connected" | "error",
 # "detail": 失败原因, "tool_count": 已注册工具数}}
 MCP_STATUS = {}
+# 后台连接过程中产生的可读消息，供 /tools 等界面查看
+MCP_MESSAGES = []
+
+
+def _connect_timeout():
+    return setting_int("mcp.connect_timeout", CONNECT_TIMEOUT)
+
+
+def _call_timeout():
+    return setting_int("mcp.call_timeout", CALL_TIMEOUT)
+
+
+def _probe_timeout():
+    return setting_int("mcp.probe_timeout", PROBE_TIMEOUT)
 
 
 def mcp_status():
     """返回本次启动的 MCP Server 状态快照，供界面展示。"""
     return {name: dict(info) for name, info in MCP_STATUS.items()}
+
+
+def mcp_messages():
+    """返回后台连接过程产生的消息快照。"""
+    return list(MCP_MESSAGES)
 
 
 def default_mcp_config_path():
@@ -60,7 +82,7 @@ def default_mcp_config_path():
 
 def load_mcp_servers(path=None):
     """读取 .mcp.json，返回 (服务器配置列表 [(name, spec)], 错误信息)。"""
-    path = path or default_mcp_config_path()
+    path = Path(path) if path else default_mcp_config_path()
     if not path.is_file():
         return [], None
     try:
@@ -121,7 +143,7 @@ def describe_error(error):
     return text or type(error).__name__
 
 
-def unreachable_reason(spec, timeout=5):
+def unreachable_reason(spec, timeout=None):
     """streamable_http 服务器先探测 TCP 连通性，返回可读原因或 None。
 
     MCP SDK 的 anyio cancel scope 会把连接失败的原因替换成 CancelledError，
@@ -133,8 +155,9 @@ def unreachable_reason(spec, timeout=5):
     if not host:
         return f"url 缺少有效主机名：{raw_url}"
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    probe_timeout = timeout or _probe_timeout()
     try:
-        with socket.create_connection((host, port), timeout=timeout):
+        with socket.create_connection((host, port), timeout=probe_timeout):
             return None
     except OSError as e:
         return f"无法连接 {host}:{port}（{e}）"
@@ -226,8 +249,8 @@ class MCPManager:
                     )
                 )
             session = await stack.enter_async_context(ClientSession(read, write))
-            await asyncio.wait_for(session.initialize(), timeout=CONNECT_TIMEOUT)
-            listed = await asyncio.wait_for(session.list_tools(), timeout=CONNECT_TIMEOUT)
+            await asyncio.wait_for(session.initialize(), timeout=_connect_timeout())
+            listed = await asyncio.wait_for(session.list_tools(), timeout=_connect_timeout())
         except Exception:
             # 关闭失败可能是 CancelledError，必须吞掉以保留原始异常
             try:
@@ -240,7 +263,8 @@ class MCPManager:
         self._sessions[name] = session
         return listed.tools or []
 
-    def connect(self, name, spec, timeout=CONNECT_TIMEOUT + 10):
+    def connect(self, name, spec, timeout=None):
+        timeout = timeout or (_connect_timeout() + 10)
         future = asyncio.run_coroutine_threadsafe(
             self._connect(name, spec), self._loop
         )
@@ -255,7 +279,7 @@ class MCPManager:
             session.call_tool(tool_name, args or {}), self._loop
         )
         try:
-            result = future.result(CALL_TIMEOUT)
+            result = future.result(_call_timeout())
         except Exception as e:
             return f"Error: MCP 工具 {tool_name} 调用失败：{describe_error(e)}"
         try:
@@ -277,7 +301,7 @@ class MCPManager:
 
         try:
             future = asyncio.run_coroutine_threadsafe(_close_all(), self._loop)
-            future.result(10)
+            future.result(setting_int("mcp.close_timeout", 10))
         except Exception:
             pass
         self._loop.call_soon_threadsafe(self._loop.stop)
@@ -302,74 +326,105 @@ def _make_caller(manager, server_name, tool_name):
     return _call
 
 
-def setup_mcp(manager=None, path=None):
+def _connect_server(manager, name, spec, taken, messages):
+    """连接单个服务器并注册其工具，结果写入 MCP_STATUS。"""
+    spec_error = _validate_spec(name, spec)
+    if spec_error:
+        messages.append(f"错误：{spec_error}")
+        MCP_STATUS[name] = {"state": "error", "detail": spec_error, "tool_count": 0}
+        return
+    if _transport_of(spec) in HTTP_TYPES:
+        reason = unreachable_reason(spec)
+        if reason:
+            messages.append(f"错误：MCP Server {name} {reason}")
+            MCP_STATUS[name] = {"state": "error", "detail": reason, "tool_count": 0}
+            return
+    try:
+        tools = manager.connect(name, spec)
+    except BaseException as e:
+        detail = describe_error(e)
+        messages.append(f"错误：MCP Server {name} 连接失败：{detail}")
+        MCP_STATUS[name] = {"state": "error", "detail": detail, "tool_count": 0}
+        return
+
+    registered = 0
+    for tool in tools:
+        exposed = _pick_exposed_name(name, tool.name, taken)
+        if exposed is None:
+            messages.append(
+                f"错误：MCP 工具 {tool.name}（来自 {name}）名称冲突，已跳过"
+            )
+            continue
+        taken.add(exposed)
+        schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {
+            "type": "object",
+            "properties": {},
+        }
+        description = tool.description or f"MCP 工具 {tool.name}（来自 {name}）"
+        if exposed != tool.name:
+            description = f"[{name}] {description}"
+        register_dynamic_tool(
+            exposed,
+            description,
+            schema,
+            _make_caller(manager, name, tool.name),
+            server=name,
+            origin=tool.name,
+        )
+        registered += 1
+    MCP_STATUS[name] = {
+        "state": "connected",
+        "detail": "",
+        "tool_count": registered,
+    }
+    messages.append(f"MCP Server {name} 已连接，注册 {registered} 个工具")
+
+
+def setup_mcp(manager=None, path=None, background=False):
     """读取 .mcp.json、连接各服务器并把工具注册进本地工具表。
 
+    background=True 时立即返回，由后台线程依次连接：界面可以先启动，
+    MCP 区域在连接完成后通过 mcp_status() 动态刷新。
     返回 (manager, 状态消息列表)；单个服务器失败只记录错误消息，不影响其他服务器。
     没有配置文件时返回 (None, [])。
     """
     servers, error = load_mcp_servers(path)
     if error:
+        MCP_STATUS.clear()
+        MCP_MESSAGES[:] = [error]
         return None, [error]
     if not servers:
         return None, []
 
     MCP_STATUS.clear()
+    MCP_MESSAGES.clear()
     manager = manager or MCPManager()
     manager.start()
 
-    messages = []
-    taken = set()  # 本次注册已占用的暴露名
-    for name, spec in servers:
-        spec_error = _validate_spec(name, spec)
-        if spec_error:
-            messages.append(f"错误：{spec_error}")
-            MCP_STATUS[name] = {"state": "error", "detail": spec_error, "tool_count": 0}
-            continue
-        if _transport_of(spec) in HTTP_TYPES:
-            reason = unreachable_reason(spec)
-            if reason:
-                messages.append(f"错误：MCP Server {name} {reason}")
-                MCP_STATUS[name] = {"state": "error", "detail": reason, "tool_count": 0}
-                continue
-        try:
-            tools = manager.connect(name, spec)
-        except BaseException as e:
-            detail = describe_error(e)
-            messages.append(f"错误：MCP Server {name} 连接失败：{detail}")
-            MCP_STATUS[name] = {"state": "error", "detail": detail, "tool_count": 0}
-            continue
+    for name, _ in servers:
+        MCP_STATUS[name] = {"state": "connecting", "detail": "", "tool_count": 0}
 
-        registered = 0
-        for tool in tools:
-            exposed = _pick_exposed_name(name, tool.name, taken)
-            if exposed is None:
-                messages.append(
-                    f"错误：MCP 工具 {tool.name}（来自 {name}）名称冲突，已跳过"
-                )
-                continue
-            taken.add(exposed)
-            schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {
-                "type": "object",
-                "properties": {},
-            }
-            description = tool.description or f"MCP 工具 {tool.name}（来自 {name}）"
-            if exposed != tool.name:
-                description = f"[{name}] {description}"
-            register_dynamic_tool(
-                exposed,
-                description,
-                schema,
-                _make_caller(manager, name, tool.name),
-                server=name,
-                origin=tool.name,
-            )
-            registered += 1
-        MCP_STATUS[name] = {
-            "state": "connected",
-            "detail": "",
-            "tool_count": registered,
-        }
-        messages.append(f"MCP Server {name} 已连接，注册 {registered} 个工具")
+    def worker():
+        taken = set()
+        messages = []
+        for name, spec in servers:
+            try:
+                _connect_server(manager, name, spec, taken, messages)
+            except BaseException as e:  # 兜底：单个服务器异常不影响其他服务器
+                detail = describe_error(e)
+                messages.append(f"错误：MCP Server {name} 连接失败：{detail}")
+                MCP_STATUS[name] = {
+                    "state": "error",
+                    "detail": detail,
+                    "tool_count": 0,
+                }
+            # 每个服务器有结果后立即同步消息，便于界面实时展示
+            MCP_MESSAGES[:] = messages
 
-    return manager, messages
+    if background:
+        thread = threading.Thread(target=worker, name="mcp-setup", daemon=True)
+        thread.start()
+        return manager, ["MCP Server 正在后台连接，连接完成后侧栏会自动刷新…"]
+
+    worker()
+    return manager, list(MCP_MESSAGES)

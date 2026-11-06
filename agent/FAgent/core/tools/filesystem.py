@@ -6,9 +6,18 @@ import shutil
 
 from .common import detect_encoding, is_text_file, resolve_path
 from .registry import tool
+from ..config import setting_int
 
 MAX_LIST_ENTRIES = 500
-DEFAULT_MAX_CHARS = 20000
+DEFAULT_MAX_CHARS = 20_000
+
+
+def _max_list_entries():
+    return setting_int("filesystem.max_list_entries", MAX_LIST_ENTRIES)
+
+
+def _max_read_chars():
+    return setting_int("filesystem.max_read_chars", DEFAULT_MAX_CHARS)
 
 
 @tool(
@@ -34,12 +43,13 @@ def list_directory(path=".", recursive=False):
     if not os.path.isdir(base):
         return f"Error: 目录不存在：{base}"
 
+    max_entries = _max_list_entries()
     lines = [f"目录：{base}"]
     count = 0
 
     def add_entry(display, full):
         nonlocal count
-        if count >= MAX_LIST_ENTRIES:
+        if count >= max_entries:
             return
         count += 1
         if os.path.isdir(full):
@@ -67,8 +77,8 @@ def list_directory(path=".", recursive=False):
 
     if not count:
         lines.append("（空目录）")
-    elif count >= MAX_LIST_ENTRIES:
-        lines.append(f"...（条目过多，仅显示前 {MAX_LIST_ENTRIES} 项）")
+    elif count >= max_entries:
+        lines.append(f"...（条目过多，仅显示前 {max_entries} 项）")
     return "\n".join(lines)
 
 
@@ -105,25 +115,29 @@ def get_file_type(path):
             "path": {"type": "string", "description": "要读取的文件路径"},
             "max_chars": {
                 "type": "integer",
-                "description": "最多返回的字符数，默认 20000，超出会截断",
+                "description": "最多返回的字符数，默认由 config.ini 的 filesystem.max_read_chars 配置",
             },
         },
         "required": ["path"],
     },
 )
-def read_file(path, max_chars=DEFAULT_MAX_CHARS):
+def read_file(path, max_chars=None):
     p = resolve_path(path)
     if not os.path.isfile(p):
         return f"Error: 文件不存在：{p}"
     if not is_text_file(p):
         return f"Error: {p} 不是纯文本文件，仅支持读取纯文本格式文件"
 
-    try:
-        max_chars = int(max_chars)
-    except (TypeError, ValueError):
-        max_chars = DEFAULT_MAX_CHARS
+    limit = _max_read_chars()
+    if max_chars is None:
+        max_chars = limit
+    else:
+        try:
+            max_chars = int(max_chars)
+        except (TypeError, ValueError):
+            max_chars = limit
     if max_chars <= 0:
-        max_chars = DEFAULT_MAX_CHARS
+        max_chars = limit
 
     enc = detect_encoding(p)
     with open(p, "r", encoding=enc, errors="replace") as f:
