@@ -43,6 +43,15 @@ CONNECT_TIMEOUT = 60
 CALL_TIMEOUT = 120
 HTTP_TYPES = {"streamable_http", "http", "streamable-http"}
 
+# 最近一次 setup_mcp 的连接结果：{server 名: {"state": "connected" | "error",
+# "detail": 失败原因, "tool_count": 已注册工具数}}
+MCP_STATUS = {}
+
+
+def mcp_status():
+    """返回本次启动的 MCP Server 状态快照，供界面展示。"""
+    return {name: dict(info) for name, info in MCP_STATUS.items()}
+
 
 def default_mcp_config_path():
     """.mcp.json 位于当前项目根目录（程序启动时的工作目录）。"""
@@ -305,6 +314,7 @@ def setup_mcp(manager=None, path=None):
     if not servers:
         return None, []
 
+    MCP_STATUS.clear()
     manager = manager or MCPManager()
     manager.start()
 
@@ -314,16 +324,20 @@ def setup_mcp(manager=None, path=None):
         spec_error = _validate_spec(name, spec)
         if spec_error:
             messages.append(f"错误：{spec_error}")
+            MCP_STATUS[name] = {"state": "error", "detail": spec_error, "tool_count": 0}
             continue
         if _transport_of(spec) in HTTP_TYPES:
             reason = unreachable_reason(spec)
             if reason:
                 messages.append(f"错误：MCP Server {name} {reason}")
+                MCP_STATUS[name] = {"state": "error", "detail": reason, "tool_count": 0}
                 continue
         try:
             tools = manager.connect(name, spec)
         except BaseException as e:
-            messages.append(f"错误：MCP Server {name} 连接失败：{describe_error(e)}")
+            detail = describe_error(e)
+            messages.append(f"错误：MCP Server {name} 连接失败：{detail}")
+            MCP_STATUS[name] = {"state": "error", "detail": detail, "tool_count": 0}
             continue
 
         registered = 0
@@ -347,8 +361,15 @@ def setup_mcp(manager=None, path=None):
                 description,
                 schema,
                 _make_caller(manager, name, tool.name),
+                server=name,
+                origin=tool.name,
             )
             registered += 1
+        MCP_STATUS[name] = {
+            "state": "connected",
+            "detail": "",
+            "tool_count": registered,
+        }
         messages.append(f"MCP Server {name} 已连接，注册 {registered} 个工具")
 
     return manager, messages

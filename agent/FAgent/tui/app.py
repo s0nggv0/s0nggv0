@@ -16,6 +16,14 @@ from textual.theme import Theme
 from textual.widgets import Collapsible, Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
+from core.tools.registry import tool_source
+
+try:
+    from core.mcp_client import mcp_status
+except ImportError:  # 未安装 mcp 包时界面仍可正常使用
+    def mcp_status():
+        return {}
+
 from .base import ChatPresenter, ChatView
 
 # 取色参考 opencode 的深色暖调：近黑背景 + 暖橙强调色
@@ -135,6 +143,53 @@ class UserMessage(Static):
         content.append("❯ ", style=f"bold {ACCENT}")
         content.append(text, style=f"bold {TEXT}")
         super().__init__(content)
+
+
+class TurnBlock(Vertical):
+    """一轮对话的过程容器。
+
+    思考提示、工具调用与回答都挂在这个容器下，结束时会补一行本轮摘要，
+    让「提问 → 过程 → 结果」在长会话里保持清晰的层级。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.started_at = time.monotonic()
+        self.tool_count = 0
+        self.failed_count = 0
+        # 容器挂载是异步的，先入队再统一挂上，避免快速连续事件丢消息
+        self._pending = []
+        self._ready = False
+
+    def on_mount(self):
+        self._ready = True
+        for widget in self._pending:
+            self.mount(widget)
+        self._pending.clear()
+
+    def attach(self, widget):
+        """挂载子控件；容器尚未挂载时先暂存，挂载完成后按顺序补齐。"""
+        if self._ready:
+            self.mount(widget)
+        else:
+            self._pending.append(widget)
+
+    def detach(self, widget):
+        """移除子控件；尚未挂载的直接从暂存队列里丢弃。"""
+        if widget in self._pending:
+            self._pending.remove(widget)
+        elif widget.is_mounted:
+            widget.remove()
+
+    def summary(self):
+        elapsed = time.monotonic() - self.started_at
+        parts = []
+        if self.tool_count:
+            parts.append(f"{self.tool_count} 个工具")
+            if self.failed_count:
+                parts.append(f"{self.failed_count} 失败")
+        parts.append(f"{elapsed:.1f}s")
+        return "本轮 · " + " · ".join(parts)
 
 
 class AssistantMessage(Vertical):
@@ -501,9 +556,17 @@ class FAgentApp(App, ChatView):
         color: $primary;
         text-style: bold;
     }
+    #sidebar .group {
+        width: 100%;
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+        text-style: bold;
+    }
     #sidebar .tool {
         width: 100%;
         height: 1;
+        padding: 0 0 0 1;
         color: $text-muted;
     }
     #sidebar .tool.running {
@@ -529,6 +592,18 @@ class FAgentApp(App, ChatView):
         height: auto;
         margin: 0 0 1 0;
         background: transparent;
+    }
+
+    .turn {
+        width: 100%;
+        height: auto;
+        padding: 0 0 0 2;
+    }
+    .turn-summary {
+        width: 100%;
+        height: 1;
+        color: $text-muted;
+        margin: 0 0 1 0;
     }
 
     UserMessage {
@@ -772,12 +847,51 @@ class FAgentApp(App, ChatView):
         self._spinner_timer = None
         self._spinner_frame = 0
         self._welcome = None
+        self._turn = None
         self._rounds = 0
         self._started_at = None
         self._elapsed = None
         self._was_cancelled = False
         self._last_prompt = ""
         self._state = "就绪"
+
+    def _tool_groups(self):
+        """按来源分组：本地工具一组，每个 MCP Server 一组。
+
+        连接失败、没有注册任何工具的 Server 也会保留在结果里，方便侧栏显示状态。
+        """
+        local = []
+        servers = {}
+        for name in self._presenter.agent.tool_names:
+            source = tool_source(name)
+            server = source.get("server")
+            if source.get("kind") == "mcp" and server:
+                servers.setdefault(server, []).append(name)
+            else:
+                local.append(name)
+        for server in mcp_status():
+            servers.setdefault(server, [])
+        return local, servers
+
+    @staticmethod
+    def _mcp_group_title(server, info, count):
+        """侧栏里的 MCP Server 标题：名称 + 连接状态 + 工具数。"""
+        label = Text()
+        label.append("MCP · ", style=MUTED)
+        label.append(
+            server if len(server) <= 14 else server[:13] + "…",
+            style=f"bold {TEXT}",
+        )
+        state = (info or {}).get("state")
+        if state == "connected":
+            label.append("  ●", style=GREEN)
+        elif state == "error":
+            label.append("  ✕", style=RED)
+        else:
+            label.append("  ·", style=MUTED)
+        if count:
+            label.append(f" {count}", style=MUTED)
+        return Static(label, classes="group")
 
     def compose(self) -> ComposeResult:
         agent = self._presenter.agent
@@ -792,10 +906,22 @@ class FAgentApp(App, ChatView):
         meta.append(f"  ·  {len(tools)} 个工具", style=MUTED)
 
         sidebar = [Static("工具", classes="section")]
-        for name in tools:
+        local_tools, mcp_servers = self._tool_groups()
+        status = mcp_status()
+        if local_tools:
+            sidebar.append(Static(f"本地 · {len(local_tools)}", classes="group"))
+        for name in local_tools:
             row = Static(f"· {name}", classes="tool", id=f"tool-{name}")
             self._tool_rows[name] = row
             sidebar.append(row)
+        for server, names in mcp_servers.items():
+            sidebar.append(
+                self._mcp_group_title(server, status.get(server), len(names))
+            )
+            for name in names:
+                row = Static(f"· {name}", classes="tool", id=f"tool-{name}")
+                self._tool_rows[name] = row
+                sidebar.append(row)
         sidebar += [
             Static("会话", classes="section"),
             Static(self._session_text(), id="session"),
@@ -1204,10 +1330,38 @@ class FAgentApp(App, ChatView):
 
     def _tools_text(self):
         content = Text()
-        for tool in self._presenter.agent.tools:
-            function = tool["function"]
-            content.append(f"{function['name']}", style=f"bold {TEXT}")
+        local, servers = self._tool_groups()
+        status = mcp_status()
+        specs = {
+            tool["function"]["name"]: tool["function"]
+            for tool in self._presenter.agent.tools
+        }
+
+        def add_tool(name):
+            function = specs.get(name)
+            if function is None:
+                return
+            content.append(f"  {name}", style=f"bold {TEXT}")
             content.append(f"  {function.get('description', '')}\n", style=MUTED)
+
+        content.append(f"本地工具（{len(local)}）\n", style=ACCENT)
+        for name in local:
+            add_tool(name)
+        for server, names in servers.items():
+            info = status.get(server) or {}
+            content.append(f"\nMCP · {server}", style=f"bold {TEXT}")
+            if info.get("state") == "connected":
+                content.append(
+                    f"  ● 已连接 · {info.get('tool_count', len(names))} 个工具\n",
+                    style=GREEN,
+                )
+            elif info.get("state") == "error":
+                content.append("  ✕ 未连接\n", style=RED)
+                content.append(f"    {info.get('detail', '')}\n", style=MUTED)
+            else:
+                content.append(f"  · {len(names)} 个工具\n", style=MUTED)
+            for name in names:
+                add_tool(name)
         return content
 
     def action_clear(self):
@@ -1223,10 +1377,24 @@ class FAgentApp(App, ChatView):
         else:
             self.call_from_thread(callback, *args)
 
-    def _append(self, widget):
-        container = self.query_one("#chat", VerticalScroll)
-        container.mount(widget)
-        self.call_after_refresh(container.scroll_end, animate=False)
+    def _append(self, widget, in_turn=False):
+        """挂载消息控件；in_turn=True 时挂到当前轮次容器，保持过程层级。"""
+        chat = self.query_one("#chat", VerticalScroll)
+        if in_turn and self._turn is not None:
+            self._turn.attach(widget)
+        else:
+            chat.mount(widget)
+        self.call_after_refresh(chat.scroll_end, animate=False)
+
+    def _finish_turn(self):
+        """在当前轮次末尾补一行摘要，并结束该轮。"""
+        turn = self._turn
+        self._turn = None
+        if turn is None:
+            return
+        turn.attach(Static(Text(turn.summary(), style=MUTED), classes="turn-summary"))
+        chat = self.query_one("#chat", VerticalScroll)
+        self.call_after_refresh(chat.scroll_end, animate=False)
 
     def _set_state(self, text):
         self._state = text
@@ -1261,6 +1429,9 @@ class FAgentApp(App, ChatView):
             widget = UserMessage(text)
             widget.add_class("message")
             self._append(widget)
+            self._turn = TurnBlock()
+            self._turn.add_class("turn")
+            self._append(self._turn)
 
         self._ui(apply)
 
@@ -1275,7 +1446,9 @@ class FAgentApp(App, ChatView):
             widget.add_class("message")
             self._tool = widget
             self._last_tool_message = widget
-            self._append(widget)
+            self._append(widget, in_turn=True)
+            if self._turn is not None:
+                self._turn.tool_count += 1
             self._set_sidebar_running(name)
             self._set_state(f"执行 {name}…")
             self._start_spinner()
@@ -1295,15 +1468,19 @@ class FAgentApp(App, ChatView):
             self._set_sidebar_running(None)
             if widget is not None:
                 widget.finish(result, seconds)
+                if str(result).lstrip().startswith("Error") and self._turn is not None:
+                    self._turn.failed_count += 1
                 if not widget.collapsed:
                     chat = self.query_one("#chat", VerticalScroll)
                     self.call_after_refresh(chat.scroll_end, animate=False)
             else:
+                if str(result).lstrip().startswith("Error") and self._turn is not None:
+                    self._turn.failed_count += 1
                 fallback = ToolMessage(name, args)
                 fallback.add_class("message")
                 fallback.finish(result, seconds)
                 self._last_tool_message = fallback
-                self._append(fallback)
+                self._append(fallback, in_turn=True)
             # 工具结果回传后模型还会继续推理，重新显示思考提示
             self._show_thinking()
             self._set_state("思考中…")
@@ -1326,7 +1503,7 @@ class FAgentApp(App, ChatView):
             if self._answer is None:
                 self._answer = AssistantMessage()
                 self._answer.add_class("message")
-                self._append(self._answer)
+                self._append(self._answer, in_turn=True)
             self._answer.append(text)
             self.query_one("#chat", VerticalScroll).scroll_end(animate=False)
 
@@ -1339,7 +1516,7 @@ class FAgentApp(App, ChatView):
         self._finish_answer()
         self._drop_thinking()
         if self._was_cancelled:
-            self._append(NoticeMessage("已停止生成。"))
+            self._append(NoticeMessage("已停止生成。"), in_turn=True)
 
     def _finish_answer(self):
         if self._answer is not None:
@@ -1351,7 +1528,7 @@ class FAgentApp(App, ChatView):
             self._drop_thinking()
             widget = ErrorMessage(text)
             widget.add_class("message")
-            self._append(widget)
+            self._append(widget, in_turn=True)
 
         self._ui(apply)
 
@@ -1372,6 +1549,7 @@ class FAgentApp(App, ChatView):
             if self._started_at is not None:
                 self._elapsed = time.monotonic() - self._started_at
                 self._started_at = None
+            self._finish_turn()
             self._set_state("就绪")
             input_widget.focus()
 
@@ -1383,6 +1561,7 @@ class FAgentApp(App, ChatView):
             self._answer = None
             self._tool = None
             self._last_tool_message = None
+            self._turn = None
             self._hide_completions()
             self._set_sidebar_running(None)
             self.query_one("#chat", VerticalScroll).remove_children()
@@ -1408,12 +1587,14 @@ class FAgentApp(App, ChatView):
         self._thinking.add_class("message")
         self._thinking.tick(_SPINNER_FRAMES[0], 0.0)
         self._think_started = time.monotonic()
-        self._append(self._thinking)
+        self._append(self._thinking, in_turn=True)
         self._start_spinner()
 
     def _drop_thinking(self):
         if self._thinking is not None:
-            if self._thinking.is_mounted:
+            if self._turn is not None:
+                self._turn.detach(self._thinking)
+            elif self._thinking.is_mounted:
                 self._thinking.remove()
             self._thinking = None
         self._think_started = None
