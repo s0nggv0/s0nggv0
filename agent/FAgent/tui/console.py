@@ -25,6 +25,9 @@ class ConsoleUI(ChatView):
             if command == "/clear":
                 self._presenter.clear()
                 continue
+            if command == "/compact":
+                self._presenter.compact()
+                continue
 
             self._output("---")
             self._presenter.submit(text)
@@ -56,6 +59,27 @@ class ConsoleUI(ChatView):
 
     def show_error(self, text):
         self._output(f"错误：{text}")
+
+    def show_notice(self, text):
+        self._output(text)
+
+    def show_warning(self, text):
+        self._output(f"警告：{text}")
+
+    def update_context(self, stats):
+        window = stats["window"] / 1000
+        mark = "" if not stats["is_default"] else "（默认）"
+        self._output(
+            f"上下文 {stats['tokens'] / 1000:.1f}k / {window:.0f}k{mark}"
+            f"  已占用 {stats['ratio'] * 100:.0f}%"
+        )
+
+    def show_compaction_start(self):
+        self._output("正在压缩上下文…")
+
+    def show_compaction_result(self, before_text, after_text):
+        self._output("压缩完成，压缩后的摘要：")
+        self._output(after_text)
 
     def set_busy(self, busy):
         pass

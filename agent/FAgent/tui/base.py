@@ -50,6 +50,26 @@ class ChatView:
         """展示错误信息"""
         raise NotImplementedError
 
+    def show_notice(self, text):
+        """展示中性提示信息"""
+        raise NotImplementedError
+
+    def show_warning(self, text):
+        """展示需要用户注意的警告"""
+        raise NotImplementedError
+
+    def update_context(self, stats):
+        """更新上下文用量展示（tokens / window / ratio / is_default）"""
+        raise NotImplementedError
+
+    def show_compaction_start(self):
+        """上下文压缩开始"""
+        raise NotImplementedError
+
+    def show_compaction_result(self, before_text, after_text):
+        """展示压缩前后的对照内容"""
+        raise NotImplementedError
+
     def set_busy(self, busy):
         """切换忙碌状态（禁用输入、显示进度提示等）"""
         raise NotImplementedError
@@ -81,14 +101,30 @@ class ChatPresenter:
 
     def start(self):
         self.view.show_welcome(self.agent.tool_names)
+        self._notify_context()
+        if self.agent.needs_compact():
+            self.view.show_warning(
+                "上下文占用已达 70%，请执行 /compact 压缩上下文后再开始提问。"
+            )
+
+    def _notify_context(self):
+        """把最新的上下文用量同步给界面。"""
+        self.view.update_context(self.agent.context_stats())
 
     def submit(self, text):
         """处理一条用户输入，阻塞直到得到最终回答。
 
         图形界面应把本方法放到后台线程 / 任务中执行，避免阻塞事件循环。
+        上下文占用达到阈值后，普通提问会被暂停，直到 /compact 成功完成。
         """
         text = (text or "").strip()
         if not text or self._busy:
+            return
+        if self.agent.needs_compact():
+            self.view.show_warning(
+                "上下文占用已达 70%，请先执行 /compact 压缩上下文后再继续提问。"
+            )
+            self._notify_context()
             return
 
         self._busy = True
@@ -112,9 +148,47 @@ class ChatPresenter:
         finally:
             self._busy = False
             self.view.set_busy(False)
+            self._notify_context()
+            if self.agent.needs_compact() and not self._cancel_event.is_set():
+                self.view.show_warning(
+                    "上下文占用已达 70%，请执行 /compact 压缩上下文；"
+                    "压缩成功前将暂停接受新的提问。"
+                )
+
+    def compact(self):
+        """执行上下文压缩：归档原文、调用 LLM 生成摘要并替换历史。
+
+        压缩期间禁止普通任务与工具调用；失败时保留原有上下文，可重新执行 /compact。
+        """
+        if self._busy:
+            return
+
+        self._busy = True
+        self._cancel_event.clear()
+        self.view.set_busy(True)
+        self.view.show_compaction_start()
+        try:
+            result = self.agent.compact()
+        except Exception as e:
+            self.view.show_error(f"上下文压缩失败：{e}")
+        else:
+            after_text = result["summary"] + "\n\n" + result["note"]
+            self.view.show_compaction_result(result["before_text"], after_text)
+            self.view.show_notice(
+                f"上下文压缩完成，原始上下文已归档到 {result['archive_id']}。"
+            )
+        finally:
+            self._busy = False
+            self.view.set_busy(False)
+            self._notify_context()
+            if self.agent.needs_compact():
+                self.view.show_warning(
+                    "上下文占用仍超过 70%，请检查错误后重新执行 /compact。"
+                )
 
     def clear(self):
         if self._busy:
             return
         self.agent.reset()
         self.view.clear()
+        self._notify_context()

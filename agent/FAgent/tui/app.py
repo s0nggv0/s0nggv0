@@ -13,7 +13,7 @@ from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.theme import Theme
-from textual.widgets import Collapsible, Markdown, OptionList, Static, TextArea
+from textual.widgets import Button, Collapsible, Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from core.tools.registry import tool_source
@@ -33,6 +33,7 @@ MUTED = "#8d8379"
 SURFACE = "#1b1917"
 GREEN = "#9ece8f"
 RED = "#ef7a85"
+WARNING = "#f2c97d"
 
 FAGENT_THEME = Theme(
     name="fagent",
@@ -51,11 +52,13 @@ FAGENT_THEME = Theme(
 )
 
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+CONTEXT_WARNING_PERCENT = 70
 
 # 命令面板与 /help 共用的命令清单
 COMMANDS = (
     ("/help", "显示帮助"),
     ("/tools", "列出可用工具"),
+    ("/compact", "压缩上下文"),
     ("/retry", "重发上一条提问"),
     ("/clear", "清空会话"),
     ("/quit", "退出程序"),
@@ -355,6 +358,53 @@ class ToolResultScreen(ModalScreen):
         )
 
 
+class CompactionScreen(ModalScreen):
+    """上下文压缩前后对照面板：左右两栏可独立滚动，关闭按钮退出。"""
+
+    BINDINGS = [Binding("escape", "close_panel", "关闭", priority=True)]
+
+    def __init__(self, before_text, after_text):
+        super().__init__()
+        self._before_text = before_text
+        self._after_text = after_text
+
+    def compose(self):
+        title = Text()
+        title.append("上下文压缩", style=f"bold {ACCENT}")
+        title.append("  左：压缩前原文   右：压缩后摘要", style=MUTED)
+
+        def column(heading, body):
+            return Vertical(
+                Static(heading, classes="compact-head"),
+                VerticalScroll(
+                    Static(Text(body or "（无内容）", style=TEXT), classes="compact-body"),
+                    classes="compact-scroll",
+                ),
+                classes="compact-column",
+            )
+
+        yield Vertical(
+            Static(title, id="compact-title"),
+            Horizontal(
+                column("压缩前原文", self._before_text),
+                column("压缩后摘要", self._after_text),
+                id="compact-columns",
+            ),
+            Horizontal(
+                Button("关闭", id="compact-close"),
+                id="compact-footer",
+            ),
+            id="compact-box",
+        )
+
+    def action_close_panel(self):
+        self.dismiss()
+
+    def on_button_pressed(self, event):
+        if event.button.id == "compact-close":
+            self.dismiss()
+
+
 class ErrorMessage(Static):
     """错误消息块。"""
 
@@ -371,6 +421,16 @@ class NoticeMessage(Static):
     def __init__(self, content):
         if isinstance(content, str):
             content = Text(content, style=MUTED)
+        super().__init__(content)
+
+
+class WarningMessage(Static):
+    """警告消息块：上下文接近窗口上限等需要用户处理的信息。"""
+
+    def __init__(self, text):
+        content = Text()
+        content.append("⚠ ", style=f"bold {WARNING}")
+        content.append(text, style=WARNING)
         super().__init__(content)
 
 
@@ -518,6 +578,21 @@ class FAgentApp(App, ChatView):
         width: 1fr;
         content-align: right middle;
         color: $text-muted;
+    }
+    #context {
+        width: auto;
+        padding: 0 1;
+        color: $text-muted;
+    }
+    #context.ok {
+        color: $success;
+    }
+    #context.warn {
+        color: $warning;
+    }
+    #context.danger {
+        color: $error;
+        text-style: bold;
     }
 
     #main {
@@ -670,6 +745,12 @@ class FAgentApp(App, ChatView):
         color: $text-muted;
     }
 
+    WarningMessage {
+        border-left: thick $warning;
+        padding: 0 1;
+        color: $warning;
+    }
+
     WelcomeMessage {
         align-horizontal: center;
     }
@@ -813,6 +894,54 @@ class FAgentApp(App, ChatView):
         padding: 0 1;
         color: $text-muted;
     }
+
+    CompactionScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #compact-box {
+        width: 96%;
+        height: 86%;
+        max-width: 180;
+        padding: 0 1;
+        border: round $primary;
+        background: $surface;
+    }
+    #compact-title {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+    }
+    #compact-columns {
+        height: 1fr;
+    }
+    .compact-column {
+        width: 1fr;
+        height: 1fr;
+        padding: 0 1;
+        background: transparent;
+    }
+    .compact-head {
+        height: 1;
+        color: $primary;
+        text-style: bold;
+    }
+    .compact-scroll {
+        height: 1fr;
+        border: round $panel;
+        background: $background;
+        padding: 0 1;
+        scrollbar-size-vertical: 1;
+    }
+    .compact-body {
+        width: 100%;
+        height: auto;
+    }
+    #compact-footer {
+        height: 3;
+        align-horizontal: right;
+        padding: 0 1;
+    }
     """
 
     BINDINGS = [
@@ -944,6 +1073,10 @@ class FAgentApp(App, ChatView):
         yield Vertical(
             Horizontal(
                 Static(brand, id="brand"),
+                Static(
+                    self._context_content(self._presenter.agent.context_stats()),
+                    id="context",
+                ),
                 Static(meta, id="meta"),
                 id="topbar",
             ),
@@ -1291,6 +1424,9 @@ class FAgentApp(App, ChatView):
         if text == "/tools":
             self._append(NoticeMessage(self._tools_text()))
             return
+        if text == "/compact":
+            self._compact()
+            return
         if text == "/retry":
             if self._last_prompt:
                 self._submit(self._last_prompt)
@@ -1306,6 +1442,14 @@ class FAgentApp(App, ChatView):
     def _submit(self, text):
         if self._presenter.busy:
             return
+        if self._presenter.agent.needs_compact():
+            self._append(
+                WarningMessage(
+                    "上下文占用已达 70%，请先执行 /compact 压缩上下文后再继续提问。"
+                )
+            )
+            self._set_state("等待压缩")
+            return
         self._last_prompt = text
         input_widget = self.query_one("#input", HistoryTextArea)
         input_widget.remember(text)
@@ -1317,10 +1461,21 @@ class FAgentApp(App, ChatView):
             group="chat",
         )
 
+    def _compact(self):
+        if self._presenter.busy:
+            return
+        self.query_one("#input", HistoryTextArea).disabled = True
+        self.run_worker(
+            self._presenter.compact,
+            thread=True,
+            exclusive=True,
+            group="chat",
+        )
+
     def _help_text(self):
         return (
-            "命令：/help 帮助 · /tools 工具说明 · /retry 重发上一条 · "
-            "/clear 清空会话 · /quit 退出\n"
+            "命令：/help 帮助 · /tools 工具说明 · /compact 压缩上下文 · "
+            "/retry 重发上一条 · /clear 清空会话 · /quit 退出\n"
             "输入 / 弹出命令面板，输入 @ 补全文件路径，Tab 应用候选，↑↓ 选择候选。\n"
             "快捷键：Enter 发送 · Shift+Enter 换行（Ctrl+J 同样可用）· "
             "Esc 停止回答 · Ctrl+T 展开/折叠工具结果 · Ctrl+Y 复制工具结果 · "
@@ -1408,6 +1563,26 @@ class FAgentApp(App, ChatView):
         self.query_one("#status", Static).update(" · ".join(parts))
         self._update_session()
 
+    @staticmethod
+    def _context_content(stats):
+        """顶栏上下文用量：已用 k / 窗口 k · 百分比；窗口未知时标注「默认」。"""
+        used = stats["tokens"] / 1000
+        window = stats["window"] / 1000
+        percent = stats["ratio"] * 100
+        if percent < 50:
+            color = GREEN
+        elif percent < CONTEXT_WARNING_PERCENT:
+            color = WARNING
+        else:
+            color = RED
+        content = Text()
+        content.append("上下文 ", style=MUTED)
+        content.append(f"{used:.1f}k / {window:.0f}k", style=f"bold {TEXT}")
+        content.append(f"  {percent:.0f}%", style=f"bold {color}")
+        if stats["is_default"]:
+            content.append("  默认", style=MUTED)
+        return content
+
     # ---------------------------------------------------------------- 事件
 
     def show_welcome(self, tool_names):
@@ -1417,6 +1592,45 @@ class FAgentApp(App, ChatView):
             self._welcome.add_class("message")
             self._append(self._welcome)
             self.call_after_refresh(self._center_welcome)
+
+        self._ui(apply)
+
+    def update_context(self, stats):
+        def apply():
+            try:
+                widget = self.query_one("#context", Static)
+            except NoMatches:
+                return
+            widget.update(self._context_content(stats))
+            percent = stats["ratio"] * 100
+            widget.set_class(percent < 50, "ok")
+            widget.set_class(50 <= percent < CONTEXT_WARNING_PERCENT, "warn")
+            widget.set_class(percent >= CONTEXT_WARNING_PERCENT, "danger")
+
+        self._ui(apply)
+
+    def show_notice(self, text):
+        self._ui(lambda: self._append(NoticeMessage(text)))
+
+    def show_warning(self, text):
+        def apply():
+            self._append(WarningMessage(text))
+            self._set_state("等待压缩")
+
+        self._ui(apply)
+
+    def show_compaction_start(self):
+        def apply():
+            self._drop_thinking()
+            self._finish_answer()
+            self._append(NoticeMessage("正在压缩上下文，请稍候…"))
+            self._set_state("压缩中…")
+
+        self._ui(apply)
+
+    def show_compaction_result(self, before_text, after_text):
+        def apply():
+            self.push_screen(CompactionScreen(before_text, after_text))
 
         self._ui(apply)
 

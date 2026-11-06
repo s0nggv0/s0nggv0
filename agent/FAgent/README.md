@@ -13,7 +13,8 @@ FAgent/
 ├── core/                    # 核心层：纯业务逻辑，不依赖任何 UI
 │   ├── __init__.py          # 对外统一出口
 │   ├── config.py            # 配置模型、解析与校验
-│   ├── agent.py             # 会话历史、模型调用、工具调用循环
+│   ├── agent.py             # 会话历史、模型调用、工具调用循环、上下文压缩
+│   ├── context.py           # Token 估算、上下文窗口、JSONL 归档与历史检索
 │   ├── skills.py            # 技能目录扫描、frontmatter 解析与系统提示生成
 │   ├── mcp_client.py        # MCP Client：读取 .mcp.json、连接外部 MCP Server、注册并转发 MCP 工具
 │   └── tools/               # 工具业务模块
@@ -24,8 +25,10 @@ FAgent/
 │       ├── filesystem.py    # 目录与文件的增删改查
 │       ├── web.py           # searchWeb：联网搜索；fetchWeb：抓取网
 │       ├── cli.py           # RunCli：以当前用户权限调用本机 CLI 程序
-│       └── skill.py         # createSkill：创建新技能；loadSkill：加载技能全文或附件文件
+│       ├── skill.py         # createSkill：创建新技能；loadSkill：加载技能全文或附件文件
+│       └── recall.py        # recallContext：在上下文压缩归档中检索历史信息
 ├── .agents/skills/          # 技能目录（Agent Skills 规范，可选，按需创建），每个技能一个目录（SKILL.md + references）
+├── .agents/context/         # 上下文压缩归档目录（每次 /compact 生成一个 jsonl 文件）
 └── tui/                     # 展示层：交互与渲染
     ├── __init__.py
     ├── base.py              # ChatView 契约 + ChatPresenter 共享控制器
@@ -114,6 +117,7 @@ python main.py --help
 | `Esc` | 取消当前请求，保留已生成的片段；补全面板可见时先关闭面板 |
 | `/help` | 查看命令与快捷键 |
 | `/tools` | 查看全部工具及用途 |
+| `/compact` | 归档并压缩当前上下文，弹出压缩前后对照面板 |
 | `/retry` | 重发上一条提问 |
 | `/clear` 或 `Ctrl+L` | 清空界面与会话历史 |
 | `/quit` 或 `Ctrl+Q` | 退出程序 |
@@ -131,7 +135,7 @@ MCP Server 的连接结果与失败原因。
 `Ctrl+T` 展开 / 折叠、`Ctrl+Y` 复制、`Ctrl+O` 全屏分页查看。
 配色使用内置的自定义深色主题（近黑背景 + 暖橙强调色），终端宽度不足时自动精简提示栏、字标与右侧栏。
 
-## 工具列表（本地共 17 个，另有 MCP 动态注册的工具）
+## 工具列表（本地共 18 个，另有 MCP 动态注册的工具）
 
 | 工具 | 参数 | 功能 |
 | --- | --- | --- |
@@ -152,6 +156,7 @@ MCP Server 的连接结果与失败原因。
 | `RunCli` | `command`、`args`、`timeout=60` | 以当前用户权限调用本机任意 CLI，返回 stdout、stderr 与退出码，超长输出截断 |
 | `loadSkill` | `name`、`filename?` | 仅传 `name` 返回技能 SKILL.md 全文；同时传 `filename` 读取技能附件（仅限技能目录内部） |
 | `createSkill` | `name`、`skillContext` | 在 `.agents/skills/` 下创建技能目录并生成合规的 SKILL.md，已存在时不覆盖 |
+| `recallContext` | `text`、`id?` | 在 `.agents/context/` 的压缩归档中做全文关键词检索，返回片段、归档编号与消息位置 |
 
 所有工具错误统一以 `Error: ...` 文本回传给模型，不会中断对话。
 
@@ -220,6 +225,22 @@ FAgent 内置 MCP Client，启动时读取**当前项目目录**（程序启动�
 重启 FAgent 即可识别。注意技能目录跟随**启动时的工作目录**，与 `main.py` 所在位置无关：
 想用某套技能，就在存放该技能 `.agents/skills/` 的目录下启动 FAgent。
 技能正文属于第三方提示词，安装前应自行检查其中是否包含不当的工具调用或数据外发指令。
+
+## 上下文压缩
+
+会话变长后会逐渐占满模型上下文窗口。FAgent 在每次 LLM 响应后统计 Token 用量（优先使用
+API 返回的 usage，取不到时按字符数估算），TUI 顶栏持续显示「已用 k / 窗口 k · 百分比」；
+模型窗口未知时按 128k 处理并标注「默认」。
+
+- 占用达到 70% 时界面给出警告，并暂停接受新的普通提问，直到压缩成功；
+- 输入 `/compact` 手动压缩：先把完整上下文（System Prompt、对话、工具调用参数与结果）
+  按顺序写入 `.agents/context/<编号>.jsonl`，归档成功后才调用 LLM 生成约 5000 tokens 的摘要；
+- 压缩期间不提供任何工具定义，只允许这次摘要调用，原任务与工具调用均暂停；
+- 成功后用「摘要 + 归档说明」替换历史，System Prompt 与工具定义保持不变，TUI 弹出左侧原文、
+  右侧摘要的双栏对照面板；
+- 失败时保留原有上下文并提示错误，可重新执行 `/compact`；
+- 压缩后如需历史细节，模型可调用 `recallContext(text, id?)` 在归档中做本地全文检索，
+  结果会附带归档编号与消息位置，并限制条数与总长度。
 
 ## 安全护栏
 
