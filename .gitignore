@@ -29,3 +29,6 @@ config.ini
 
 # 技能生成的文档产物
 office/deliverables/
+
+# FAgent 会话事件日志（本地运行时数据）
+**/.agents/sessions/
