@@ -32,3 +32,5 @@ office/deliverables/
 
 # FAgent 会话事件日志（本地运行时数据）
 **/.agents/sessions/
+**/.agents/context/
+**/.agents/logs/

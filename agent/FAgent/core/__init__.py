@@ -9,6 +9,7 @@ from .config import (
 )
 from .session import SessionInfo, SessionStore
 from .tools import TOOLS, run_tool, tool_names
+from .trace import setup_logging
 
 __all__ = [
     "Agent",
@@ -23,4 +24,5 @@ __all__ = [
     "TOOLS",
     "run_tool",
     "tool_names",
+    "setup_logging",
 ]

@@ -2,6 +2,8 @@ import json
 import logging
 import urllib.error
 import urllib.request
+import uuid
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -22,19 +24,10 @@ class AnythingLLMClient:
         self._configured_slug = workspace_slug
         self._resolved_slug: str | None = None
 
-    def _request(self, method: str, path: str, body: dict | None = None):
-        url = f"{self.base_url}{path}"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Accept": "application/json",
-        }
-        data = None
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    def _send(self, request: urllib.request.Request, method: str, path: str):
+        """发送请求并解析 JSON，失败统一转成带上下文的 AnythingLLMError。"""
         try:
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as resp:
                 payload = resp.read()
         except urllib.error.HTTPError as exc:
             detail = ""
@@ -57,6 +50,55 @@ class AnythingLLMClient:
             raise AnythingLLMError(
                 f"AnythingLLM returned non-JSON response: {payload[:200]!r}"
             ) from exc
+
+    def _request(self, method: str, path: str, body: dict | None = None):
+        url = f"{self.base_url}{path}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json",
+        }
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        return self._send(request, method, path)
+
+    def _request_multipart(
+        self, path: str, fields: dict[str, str], file_name: str, file_bytes: bytes
+    ):
+        """按 multipart/form-data 上传文件（urllib 没有内置 multipart 支持）。"""
+        boundary = f"----anythingllm{uuid.uuid4().hex}"
+        chunks: list[bytes] = []
+        for name, value in fields.items():
+            chunks.append(
+                (
+                    f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
+                    f"{value}\r\n"
+                ).encode("utf-8")
+            )
+        chunks.append(
+            (
+                f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
+                f'filename="{file_name}"\r\nContent-Type: application/octet-stream\r\n\r\n'
+            ).encode("utf-8")
+        )
+        chunks.append(file_bytes)
+        chunks.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+        body = b"".join(chunks)
+
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Accept": "application/json",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(body)),
+            },
+        )
+        return self._send(request, "POST", path)
 
     def list_workspaces(self) -> list[dict]:
         data = self._request("GET", "/v1/workspaces")
@@ -121,6 +163,45 @@ class AnythingLLMClient:
         if isinstance(title, str) and title.strip():
             return title.strip()
         return document.get("filename") or "?"
+
+    def upload_document(self, file_path: str, add_to_workspace: bool = True) -> dict:
+        """把本地文件上传到 AnythingLLM，并按需加入当前工作区。
+
+        返回上传接口的原始响应（含 documents[].title / location）。
+        """
+        path = Path(str(file_path)).expanduser()
+        if not path.is_file():
+            raise AnythingLLMError(f"Upload source is not a readable file: {path}")
+        try:
+            file_bytes = path.read_bytes()
+        except OSError as exc:
+            raise AnythingLLMError(f"Cannot read {path}: {exc}") from exc
+
+        fields = {"addToWorkspaces": self.resolve_workspace_slug()} if add_to_workspace else {}
+        data = self._request_multipart(
+            "/v1/document/upload", fields, path.name, file_bytes
+        )
+        if not isinstance(data, dict):
+            raise AnythingLLMError("Empty response from AnythingLLM upload endpoint")
+        if not data.get("success"):
+            raise AnythingLLMError(
+                f"AnythingLLM upload failed: {data.get('error') or data}"
+            )
+        if not data.get("documents"):
+            raise AnythingLLMError("AnythingLLM upload returned no documents")
+        logger.info("Uploaded %s (%d bytes)", path.name, len(file_bytes))
+        return data
+
+    def find_document(self, file_name: str) -> dict | None:
+        """在工作区文档中查找标题或路径匹配 file_name 的文档。"""
+        wanted = str(file_name).strip().lower()
+        for document in self.get_workspace_documents():
+            title = str(document.get("title") or "").strip().lower()
+            docpath = str(document.get("docpath") or "").strip().lower()
+            name = str(document.get("filename") or "").strip().lower()
+            if wanted in (title, name) or docpath.endswith(wanted):
+                return document
+        return None
 
     def chat(self, message: str, mode: str = "chat") -> str:
         slug = self.resolve_workspace_slug()

@@ -30,9 +30,16 @@ DEFAULTS = {
     "mcp.call_timeout": 120,
     "mcp.probe_timeout": 5,
     "mcp.close_timeout": 10,
+    # 对话主循环
+    "agent.max_steps": 12,  # 单轮最多工具调用步数，超出后终止本轮
+    "agent.max_seconds": 0,  # 单轮墙钟上限，0 表示不限制
     # 文件工具
+    "filesystem.root": "",  # 空表示以启动时工作目录为根
+    "filesystem.allow_outside": False,
     "filesystem.max_list_entries": 500,
     "filesystem.max_read_chars": 20_000,
+    # 技能
+    "skills.max_chars": 20_000,
     # 网络工具
     "web.max_chars": 20_000,
     "web.timeout": 20,
@@ -50,11 +57,14 @@ DEFAULTS = {
     "cli.default_timeout": 60,
     "cli.max_timeout": 600,
     "cli.max_output_chars": 20_000,
-    # 系统工具
-    "system.date_timeout": 5,
     # 会话
     "session.directory": ".agents/sessions",
     "session.auto_save": True,
+    # 运行日志（结构化写入 .agents/logs/）
+    "log.enabled": True,
+    "log.directory": ".agents/logs",
+    "log.level": "INFO",
+    "log.max_bytes": 1_048_576,
     # AGENTS.md 项目规范
     "agents.enabled": True,
     "agents.file": "AGENTS.md",
@@ -232,9 +242,23 @@ call_timeout=120
 probe_timeout=5
 close_timeout=10
 
+[agent]
+# 单轮最多工具调用步数，超出后终止本轮
+max_steps=12
+# 单轮墙钟上限（秒），0 表示不限制
+max_seconds=0
+
 [filesystem]
+# 文件工具允许访问的根目录，留空表示以启动时的工作目录为根
+root=
+# 是否允许访问 root 之外的路径（true 表示不做边界限制）
+allow_outside=false
 max_list_entries=500
 max_read_chars=20000
+
+[skills]
+# loadSkill 单次返回的最大字符数
+max_chars=20000
 
 [web]
 max_chars=20000
@@ -256,12 +280,15 @@ default_timeout=60
 max_timeout=600
 max_output_chars=20000
 
-[system]
-date_timeout=5
-
 [session]
 directory=.agents/sessions
 auto_save=true
+
+[log]
+enabled=true
+directory=.agents/logs
+level=INFO
+max_bytes=1048576
 
 [agents]
 # 是否在会话首次加载时注入项目根目录下的 AGENTS.md

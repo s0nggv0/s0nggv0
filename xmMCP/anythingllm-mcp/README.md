@@ -6,6 +6,7 @@ MCP Server（协议版本 **2026-07-28**，Streamable HTTP）将本机 AnythingL
 
 - **工具 `workspace_chat`**：提问 → 调用 AnythingLLM `POST /api/v1/workspace/{slug}/chat`，返回工作区 AI 的回答。
 - **工具 `workspace_file_count`**：读取 `GET /api/v1/workspace/{slug}`，返回工作区中的文件（文档）数量，可附带列出文件名。
+- **工具 `workspace_upload_document`**：把本地文件 `POST /api/v1/document/upload` 上传到当前工作区，并轮询 `GET /api/v1/workspace/{slug}` 等待向量化完成（默认最多等 120 秒，可用 `wait_timeout` 调整，`wait_for_embedding=false` 则只上传不等待）。
 - 工作区自动识别：AnythingLLM 只有一个工作区时自动选用；多个时通过 `.env` 的 `ANYTHINGLLM_WORKSPACE_SLUG` 指定。
 - 固定 `ANYTHINGLLM_SESSION_ID` 让 AnythingLLM 保持滚动对话历史。
 - 监听 `127.0.0.1:3002/mcp`，stateless（2026-07-28 无会话），单 JSON 应答。

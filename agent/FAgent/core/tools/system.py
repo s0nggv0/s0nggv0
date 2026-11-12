@@ -1,40 +1,19 @@
 """系统信息类工具：日期时间、闰年判断、工作目录。"""
 
 import os
-import subprocess
+from datetime import datetime
 
-from .common import decode_output
 from .registry import tool
-from ..config import setting_int
-
-DATE_TIMEOUT = 5
-
-
-def _date_timeout():
-    return setting_int("system.date_timeout", DATE_TIMEOUT)
 
 
 @tool(
     "getDate",
-    "获取当前电脑的日期和时间",
+    "获取当前电脑的本地日期和时间（跨平台，精确到秒）",
     {"type": "object", "properties": {}, "required": []},
 )
 def get_date():
-    try:
-        result = subprocess.run(
-            ["cmd", "/c", "date /t && time /t"],
-            capture_output=True,
-            timeout=_date_timeout(),
-        )
-        if result.returncode == 0:
-            out = decode_output(result.stdout or b"")
-            return " ".join(line.strip() for line in out.splitlines() if line.strip())
-        err = decode_output(result.stderr or b"") if result.stderr else ""
-        return f"Error: {err}"
-    except subprocess.TimeoutExpired:
-        return "Error: date command timeout"
-    except Exception as e:
-        return f"Error: {e}"
+    now = datetime.now().astimezone()
+    return f"{now:%Y-%m-%d %H:%M:%S}（{now.tzname() or '本地时区'}）"
 
 
 @tool(

@@ -1,6 +1,8 @@
 """Agent 核心：模型交互、会话历史、工具调用循环与上下文压缩，不包含任何输入输出。"""
 
 import json
+import logging
+import time
 
 from .config import activate_config, setting_int
 from .context import (
@@ -13,6 +15,8 @@ from .context import (
 )
 from .session import build_agents_message, is_agents_message, read_agents_guidance
 from .tools import TOOLS, run_tool
+
+logger = logging.getLogger("fagent.agent")
 
 # 上下文压缩专用 Prompt：把历史对话整理成约 5000 tokens 的工作摘要。
 COMPACT_PROMPT = """你是一名 AI Agent 的上下文管理助手。当前会话即将达到上下文窗口限制，需要将历史对话压缩为一份高质量的工作摘要，以便 Agent 在新的上下文中继续执行任务。
@@ -214,7 +218,28 @@ class Agent:
         self.history.append({"role": "user", "content": prompt})
         self._last_usage_tokens = None
 
-        while True:
+        # 单轮上限：步数防止工具调用无限循环，墙钟上限防止单次任务长时间占用
+        max_steps = max(1, setting_int("agent.max_steps", 12))
+        max_seconds = setting_int("agent.max_seconds", 0)
+        started = time.monotonic()
+        logger.info(
+            "turn_start model=%s max_steps=%d max_seconds=%s history=%d",
+            self.config.model_name,
+            max_steps,
+            max_seconds,
+            len(self.history),
+        )
+
+        for step in range(1, max_steps + 1):
+            elapsed = time.monotonic() - started
+            if max_seconds > 0 and elapsed > max_seconds:
+                return self._abort_turn(
+                    f"本轮对话已超过 {max_seconds} 秒上限，已终止。如需继续，请说明当前进度。",
+                    "timeout",
+                    step,
+                    started,
+                )
+
             content, tool_calls, usage_total = self._stream(
                 self._messages(), self.tools, on_token, is_cancelled
             )
@@ -224,10 +249,21 @@ class Agent:
             # 用户取消：丢弃本轮未完成的工具调用，只保留已输出的文本
             if is_cancelled is not None and is_cancelled():
                 self.history.append({"role": "assistant", "content": content or None})
+                logger.info(
+                    "turn_end step=%d reason=cancelled elapsed=%.3fs",
+                    step,
+                    time.monotonic() - started,
+                )
                 return content
 
             if not tool_calls:
                 self.history.append({"role": "assistant", "content": content})
+                logger.info(
+                    "turn_end step=%d reason=answer elapsed=%.3fs tokens=%s",
+                    step,
+                    time.monotonic() - started,
+                    usage_total,
+                )
                 return content
 
             self.history.append(
@@ -263,6 +299,27 @@ class Agent:
                 )
                 if on_tool_result:
                     on_tool_result(name, args, result)
+
+        # 达到步数上限：此时历史以工具结果结尾，不会留下悬空的 tool_calls
+        return self._abort_turn(
+            f"已终止：本轮工具调用达到上限 {max_steps} 步。"
+            "如需继续，请说清楚下一步要处理的目标。",
+            "max_steps",
+            max_steps,
+            started,
+        )
+
+    def _abort_turn(self, message, reason, step, started):
+        """以一条说明性回答结束本轮，并记录终止原因。"""
+        self.history.append({"role": "assistant", "content": message})
+        logger.warning(
+            "turn_end step=%d reason=%s elapsed=%.3fs history=%d",
+            step,
+            reason,
+            time.monotonic() - started,
+            len(self.history),
+        )
+        return message
 
     # ------------------------------------------------------------ 上下文管理
 

@@ -5,6 +5,7 @@ import os
 import sys
 
 from core import Agent, ConfigError, ensure_config, load_config, resolve_config_path
+from core import setup_logging
 from core.skills import build_skills_prompt, discover_skills
 from tui import available_backends, create_ui
 
@@ -75,6 +76,10 @@ def main(argv=None):
     if created or config.is_placeholder:
         _notify_config(config_path, created, args.ui)
         return 1
+
+    log_path = setup_logging()
+    if log_path is not None:
+        print(f"运行日志：{log_path}")
 
     mcp_manager, mcp_messages = (None, [])
     if setup_mcp is not None:

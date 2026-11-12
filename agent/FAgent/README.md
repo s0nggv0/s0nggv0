@@ -9,6 +9,7 @@
 ```text
 FAgent/
 ├── main.py                  # 组合根：加载配置、装配 Agent 与界面、解析启动参数
+├── selfcheck.py             # 自测脚本：不依赖模型与网络，验证工具层与核心模块
 ├── config.ini               # API 与运行参数配置（不存在时首次启动自动生成，不纳入版本控制）
 ├── core/                    # 核心层：纯业务逻辑，不依赖任何 UI
 │   ├── __init__.py          # 对外统一出口
@@ -17,6 +18,7 @@ FAgent/
 │   ├── context.py           # Token 估算、上下文窗口、JSONL 归档与历史检索
 │   ├── session.py           # 会话事件日志：保存 / 列举 / 恢复会话，读取 AGENTS.md
 │   ├── skills.py            # 技能目录扫描、frontmatter 解析与系统提示生成
+│   ├── trace.py             # 运行日志：写入 .agents/logs/，按天切分 + 轮转
 │   ├── mcp_client.py        # MCP Client：读取 .mcp.json、异步连接外部 MCP Server、注册并转发 MCP 工具
 │   └── tools/               # 工具业务模块
 │       ├── __init__.py      # 注册编排 + 公共 API
@@ -59,7 +61,7 @@ main.py  ──>  core
 
 - Python 3.9 及以上
 - 依赖：`openai`、`textual`（TUI 使用，Rich 随其安装）、`trafilatura`（网页正文提取）、`mcp`（MCP Client，可选）
-- `getDate` 工具依赖 Windows 的 `cmd /c date /t && time /t`，其他系统会返回 `Error`
+- `getDate` 工具跨平台，直接读取本机时间（精确到秒），不再依赖 `date` / `time` 命令
 - `fetchWeb` 依赖本地 `curl` 命令行程序（Windows 10+ 自带），需确保其在 `PATH` 中
 
 安装依赖：
@@ -101,9 +103,20 @@ call_timeout=120
 probe_timeout=5
 close_timeout=10
 
+[agent]
+max_steps=12
+max_seconds=0
+
 [filesystem]
+# 文件工具允许访问的根目录，留空表示以启动时的工作目录为根
+root=
+# 是否允许访问 root 之外的路径（true 表示不做边界限制）
+allow_outside=false
 max_list_entries=500
 max_read_chars=20000
+
+[skills]
+max_chars=20000
 
 [web]
 max_chars=20000
@@ -123,12 +136,15 @@ default_timeout=60
 max_timeout=600
 max_output_chars=20000
 
-[system]
-date_timeout=5
-
 [session]
 directory=.agents/sessions
 auto_save=true
+
+[log]
+enabled=true
+directory=.agents/logs
+level=INFO
+max_bytes=1048576
 
 [agents]
 enabled=true
@@ -147,7 +163,10 @@ tool_collapse_chars=600
 
 - 支持 `#` 开头的注释行、空行与 `[section]` 小节；默认小节的键保持原名，其余小节的键为 `section.key`
 - `base_url`、`model_name`、`key` 任一缺失时，程序打印错误并以退出码 1 结束
-- 所有超时、条数上限、上下文窗口、告警比例、会话目录、AGENTS.md 与侧栏尺寸等参数均来自 `config.ini` + 内置默认值，不再硬编码
+- 所有超时、条数上限、上下文窗口、告警比例、会话目录、AGENTS.md、文件访问根目录与侧栏尺寸等参数均来自 `config.ini` + 内置默认值，不再硬编码
+- 单轮工具调用最多 `[agent] max_steps` 步（默认 12），超过后本轮自动终止并说明原因；`max_seconds` 可再加一层墙钟上限
+- 文件类工具默认只能在 `[filesystem] root`（留空即启动目录）内操作，越界访问返回明确错误；确实需要跨目录时把 `allow_outside` 设为 `true`
+- 运行日志按天写入 `[log] directory` 下的 `fagent-YYYYMMDD.log`，记录每轮对话、每次工具调用与 MCP 连接结果，可在 `[log]` 调整级别与轮转大小
 - `searchWeb` 使用 `[search]` 小节的 `baidu_api_key` 调用百度千帆搜索 API；缺失时工具会向模型返回明确的错误信息
 - `config.ini` 已被 `.gitignore` 忽略，请勿提交真实密钥
 - 与 `.mcp.json`、`.agents/` 一样以启动时的工作目录为项目根
@@ -237,7 +256,7 @@ python main.py --help
 
 | 工具 | 参数 | 功能 |
 | --- | --- | --- |
-| `getDate` | 无 | 获取当前日期时间（仅 Windows） |
+| `getDate` | 无 | 获取当前日期时间（跨平台，精确到秒） |
 | `isLeapYear` | `year` | 判断闰年 |
 | `getCwd` | 无 | 获取当前工作目录绝对路径 |
 | `listDirectory` | `path="."`、`recursive=false` | 列出目录内容，单次默认最多 500 条（`filesystem.max_list_entries`） |
@@ -252,11 +271,12 @@ python main.py --help
 | `fetchWeb` | `url`、`max_chars` | 用 curl 抓取网页，经 trafilatura 提取正文并转为 Markdown（默认值见 `[web]`） |
 | `searchWeb` | `query`、`top_k` | 调用百度千帆搜索 API，返回结果摘要与参考来源标题、URL（默认 10、上限 50，见 `[web]`） |
 | `RunCli` | `command`、`args`、`timeout` | 以当前用户权限调用本机任意 CLI，返回 stdout、stderr 与退出码（默认 / 上限见 `[cli]`） |
-| `loadSkill` | `name`、`filename?` | 仅传 `name` 返回技能 SKILL.md 全文；同时传 `filename` 读取技能附件（仅限技能目录内部） |
+| `loadSkill` | `name`、`filename?` | 仅传 `name` 返回技能 SKILL.md 全文；同时传 `filename` 读取技能附件（仅限技能目录内部，超过 `[skills] max_chars` 自动截断） |
 | `createSkill` | `name`、`skillContext` | 在 `.agents/skills/` 下创建技能目录并生成合规的 SKILL.md，已存在时不覆盖 |
 | `recallContext` | `text`、`id?` | 在 `.agents/context/` 的压缩归档中做全文关键词检索，返回片段、归档编号与消息位置 |
 
 所有工具错误统一以 `Error: ...` 文本回传给模型，不会中断对话。
+单轮工具调用达到 `[agent] max_steps`（默认 12）时本轮自动终止并说明原因，避免无限循环。
 
 ## MCP 工具（外部 MCP Server）
 
@@ -344,13 +364,27 @@ API 返回的 usage，取不到时按字符数估算），TUI 顶栏持续显示
 
 ## 安全护栏
 
+- 文件类工具默认只能在 `[filesystem] root` 内操作（留空即启动目录），越界路径按真实路径判定后拒绝，符号链接无法绕过；确实需要跨目录时把 `allow_outside` 设为 `true`。
 - `deleteDirectory` 拒绝删除磁盘根目录、当前工作目录及其上级目录。
 - `createFile` 目标已存在时不覆盖，需改用 `editFile`。
 - `readFile` / `editFile` 只处理纯文本文件，二进制文件直接报错。
 - `renamePath` 目标已存在时报错，不会静默覆盖。
+- `loadSkill` 只允许读取技能目录内部的文件，单次返回内容超过 `[skills] max_chars` 会自动截断。
 - `RunCli` 以当前用户权限执行任意本机程序，**并非沙箱**：请仅在可信环境中使用，并注意模型可能发起删除、修改系统状态等操作。
 - `RunCli` 使用参数列表且 `shell=False`，不经过 Shell 拼接；标准输入置空，超时上限 600 秒，超长输出自动截断。
 - 工具异常由 `registry.run_tool` 统一捕获，避免聊天循环中断。
+
+## 自测
+
+不依赖模型与网络，直接验证工具层与核心模块：
+
+```bash
+python selfcheck.py
+```
+
+覆盖闰年边界、日期格式、工作目录、未知工具 / 缺参拒绝、文件与目录工具的真实副作用、
+路径白名单、技能创建（命名规范化、重复拒绝、frontmatter）与加载截断、会话保存/读取往返、
+上下文归档与关键词检索，共 31 项断言，全部通过时退出码为 0。
 
 ## 扩展指南
 

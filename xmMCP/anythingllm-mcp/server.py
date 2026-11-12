@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Annotated, Literal
 
 from mcp.server import MCPServer
@@ -57,6 +58,59 @@ def workspace_file_count(
         return f"The workspace contains {total} file(s)."
     listing = "\n".join(f"- {client.document_title(doc)}" for doc in documents)
     return f"The workspace contains {total} file(s):\n{listing}"
+
+
+@mcp.tool(
+    title="Upload a local file and embed it",
+    annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False),
+)
+def workspace_upload_document(
+    file_path: Annotated[
+        str,
+        Field(description="Local path of the file to upload, absolute or relative to the current directory."),
+    ],
+    wait_for_embedding: Annotated[
+        bool,
+        Field(description="When true, block until the document shows up in the workspace (embedded)."),
+    ] = True,
+    wait_timeout: Annotated[
+        int,
+        Field(ge=1, le=600, description="Maximum seconds to wait for embedding when wait_for_embedding is true."),
+    ] = 120,
+) -> str:
+    """Upload a local document into the AnythingLLM workspace and vectorize it: the file is sent to the workspace, then the tool can wait until the document is embedded so it becomes searchable by workspace_chat."""
+    try:
+        data = client.upload_document(file_path, add_to_workspace=True)
+    except AnythingLLMError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    document = data["documents"][0]
+    title = document.get("title") or file_path
+    location = document.get("location") or document.get("docpath") or ""
+    lines = [f"Uploaded '{title}' to workspace '{client.resolve_workspace_slug()}'."]
+
+    if location:
+        lines.append(f"Location: {location}")
+    if not wait_for_embedding:
+        lines.append("Embedding was not awaited; use workspace_file_count to check later.")
+        return "\n".join(lines)
+
+    deadline = time.monotonic() + wait_timeout
+    while time.monotonic() < deadline:
+        time.sleep(2)
+        try:
+            found = client.find_document(location or title)
+        except AnythingLLMError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if found:
+            lines.append(f"Vectorization finished; the document is now searchable (docpath={found.get('docpath') or location}).")
+            return "\n".join(lines)
+
+    lines.append(
+        f"Embedding not confirmed within {wait_timeout}s; the upload itself succeeded, "
+        "but workspace_chat may not see this document yet."
+    )
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

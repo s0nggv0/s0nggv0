@@ -1,5 +1,6 @@
 """技能类工具：createSkill 创建新技能，loadSkill 按需加载技能全文或其附件文件。"""
 
+from ..config import setting_int
 from ..skills import (
     compose_skill_document,
     default_skills_dir,
@@ -11,6 +12,24 @@ from ..skills import (
     resolve_skill_file,
 )
 from .registry import tool
+
+DEFAULT_MAX_SKILL_CHARS = 20_000
+
+
+def _max_skill_chars():
+    return setting_int("skills.max_chars", DEFAULT_MAX_SKILL_CHARS)
+
+
+def _truncate(text):
+    """限制单次读取的字符数，避免一个超长技能把上下文挤满。"""
+    limit = _max_skill_chars()
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return (
+        text[:limit]
+        + f"\n\n...（内容已截断，共 {len(text)} 字符，仅显示前 {limit} 字符；"
+        "可用 loadSkill 指定 filename 分段读取附件）"
+    )
 
 
 @tool(
@@ -72,7 +91,8 @@ def create_skill(name, skillContext):
     "加载已安装技能的完整说明或其附件文件。仅传 name 时返回该技能 SKILL.md 全文；"
     "同时传 filename 时只读取对应的附件文件，不重复返回 SKILL.md。filename 支持"
     "相对技能目录的路径、项目相对路径与绝对路径；仅提供文件名时在技能目录内递归搜索，"
-    "存在多个同名文件时会返回候选路径。读取范围限制在该技能目录内部。",
+    "存在多个同名文件时会返回候选路径。读取范围限制在该技能目录内部，"
+    "单次返回内容超过 skills.max_chars 时会自动截断。",
     {
         "type": "object",
         "properties": {
@@ -96,7 +116,7 @@ def load_skill(name, filename=None):
 
     if filename is None or not str(filename).strip():
         header = f"[Skill: {skill.name} | 技能目录: {skill.directory}]\n\n"
-        return header + load_skill_text(skill)
+        return _truncate(header + load_skill_text(skill))
 
     path, error = resolve_skill_file(skill, filename)
     if error:
@@ -105,4 +125,4 @@ def load_skill(name, filename=None):
         text = read_text(path)
     except OSError as e:
         return f"Error: 读取文件失败：{e}"
-    return f"[Skill {skill.name} 附件文件: {path}]\n\n{text}"
+    return _truncate(f"[Skill {skill.name} 附件文件: {path}]\n\n{text}")

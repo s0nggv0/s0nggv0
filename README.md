@@ -30,6 +30,7 @@ office/
 | --- | --- |
 | `workspace_chat` | 向 AnythingLLM 工作区提问，AI 基于工作区中的文档作答 |
 | `workspace_file_count` | 返回工作区文档数量，可附文件名列表 |
+| `workspace_upload_document` | 上传本地文件到工作区并等待向量化完成 |
 
 - 端点：`http://127.0.0.1:3002/mcp`
 - 启动：`python server.py`（需 AnythingLLM 在 `3001` 端口运行）
@@ -54,6 +55,8 @@ office/
 | `create_pet` | 新增宠物档案 |
 
 - 依赖 `pethospital.exe`（宠物医院 REST API），启动时自动检测端口并拉起
+- 工具入参在 schema 中声明范围与枚举（如 `page_size` 1–100、`order` 仅 `asc`/`desc`）
+- 上游失败统一返回带错误码的 JSON（`UPSTREAM_TIMEOUT` / `UPSTREAM_UNAVAILABLE` / `UPSTREAM_HTTP_ERROR` / `UPSTREAM_BAD_PAYLOAD`），幂等 GET 带指数退避重试，每次调用输出耗时日志
 - 设计规格见 `MCP-SERVER-DESIGN.md`，校验脚本 `verify_mcp.py`
 
 ## xmMCP/cwyymcp
@@ -117,7 +120,10 @@ python main.py --ui console    # 命令行界面
 - `.agents/skills/`：遵循 Agent Skills 规范的技能目录，以**启动时的工作目录**为项目根；启动时仅扫描各技能的 name/description 注入系统提示，模型按需调用 `loadSkill` 工具加载 SKILL.md 全文或附件文件；也可在对话中调用 `createSkill` 生成新技能。共享技能库见下方 `office/`，在 `office/` 目录下启动 FAgent 即可加载这些技能
 - 配置从当前目录 `config.ini` 读取（未配置项使用内置默认值）；首次启动缺少文件时会自动生成带 mock 信息的完整模板并弹窗提示，修改后重启生效。联网搜索另需 `[search]` 小节的 `baidu_api_key`；配置文件已被 `.gitignore` 排除
 - 能力：日期、闰年、当前目录，文件 / 目录增删改查，联网搜索与网页正文抓取，本机 CLI 调用，按需加载技能与创建技能
-- `getDate` **仅 Windows 可用**；`fetchWeb` 依赖系统 `curl` 与 `trafilatura`；`RunCli` 以当前用户权限执行任意本机程序，仅建议在可信环境使用；其余工具跨平台
+- 文件类工具默认限制在 `[filesystem] root`（留空即启动目录）内，越界访问直接拒绝；可设 `allow_outside=true` 放开
+- 单轮工具调用上限 12 步（`[agent] max_steps`），每轮对话、每次工具调用与 MCP 连接写入 `.agents/logs/fagent-YYYYMMDD.log`
+- `getDate` 跨平台，直接读取本机时间；`fetchWeb` 依赖系统 `curl` 与 `trafilatura`；`RunCli` 以当前用户权限执行任意本机程序，仅建议在可信环境使用
+- 自测：`python selfcheck.py`（31 项断言，不依赖模型与网络）
 - 详细说明见 `agent/FAgent/README.md`
 
 ## office

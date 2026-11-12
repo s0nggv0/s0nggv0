@@ -2,12 +2,14 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AnythingLLM 工作台</title>
 <style>
   body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;max-width:760px;margin:40px auto;padding:0 20px;color:#1f2733}
   h1{font-size:20px}
   .card{background:#fff;border:1px solid #e0e4e8;border-radius:8px;padding:16px;margin-bottom:16px}
   input[type=text],select{font-size:14px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;margin-right:8px}
+  .conn-input{min-width:220px}
   input[type=file]{display:block;margin:8px 0}
   button{background:#2563eb;color:#fff;border:0;border-radius:6px;padding:8px 16px;font-size:14px;cursor:pointer;margin-right:6px}
   button:disabled{background:#9ca3af;cursor:not-allowed}
@@ -22,6 +24,12 @@
   .folder{font-weight:600;margin:10px 0 4px;color:#334155}
   .doc{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:4px 8px;border-bottom:1px solid #f1f5f9;font-size:14px}
   .doc .meta{color:#94a3b8;font-size:12px}
+  @media (max-width:560px){
+    body{margin:20px auto;padding:0 12px}
+    .conn-input,select{width:100%;min-width:0;margin:6px 0}
+    button{margin:6px 6px 0 0}
+    .doc{flex-wrap:wrap;align-items:flex-start}
+  }
 </style>
 </head>
 <body>
@@ -29,9 +37,9 @@
 
   <div class="card" id="connCard">
     <label>API 地址：</label>
-    <input type="text" id="apiUrl" style="min-width:220px">
+    <input type="text" id="apiUrl" class="conn-input">
     <label>API Key：</label>
-    <input type="text" id="apiKey" style="min-width:220px">
+    <input type="text" id="apiKey" class="conn-input">
     <button id="btnConnect">保存并连接</button>
   </div>
 
@@ -61,6 +69,7 @@
   </div>
 
 <script>
+// 本文件是 AnythingLLM 工作台网页的唯一来源；xmMCP/anythingllm-mcp/upload.html 是它的同步副本。
 let API = localStorage.getItem("anythingllm_api") || "http://localhost:3001/api";
 let KEY = localStorage.getItem("anythingllm_key") || "";
 let WS_SLUG = "";
@@ -178,11 +187,13 @@ async function createWs() {
 
 async function deleteWs() {
   if (!WS_SLUG) return;
-  if (!confirm("确认删除整个工作区「" + WS_SLUG + "」？该操作不可恢复！")) return;
+  const slug = WS_SLUG;
+  if (!confirm("确认删除整个工作区「" + slug + "」？该操作不可恢复！")) return;
   try {
-    await api("/workspace/" + WS_SLUG, { method: "DELETE" });
+    await api("/workspace/" + slug, { method: "DELETE" });
     WS_SLUG = "";
-    log(".ok 已删除工作区：" + WS_SLUG);
+    $("wsInfo").textContent = "";
+    log(".ok 已删除工作区：" + slug);
     await loadWorkspaces();
   } catch (e) { log(".err 删除工作区失败：" + e); }
 }

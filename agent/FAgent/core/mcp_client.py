@@ -27,8 +27,10 @@ MCP SDK 基于 asyncio，而 Agent 的工具调用循环是同步的，
 
 import asyncio
 import json
+import logging
 import socket
 import threading
+import time
 from contextlib import AsyncExitStack
 from pathlib import Path
 from urllib.parse import urlparse
@@ -40,6 +42,8 @@ from mcp.client.streamable_http import streamablehttp_client
 from .config import setting_int
 from .skills import project_root
 from .tools.registry import has_tool, register_dynamic_tool
+
+logger = logging.getLogger("fagent.mcp")
 
 CONNECT_TIMEOUT = 60
 CALL_TIMEOUT = 120
@@ -274,18 +278,43 @@ class MCPManager:
         """同步调用指定服务器上的工具，返回值始终是回传给模型的文本。"""
         session = self._sessions.get(server_name)
         if session is None:
+            logger.warning("call server=%s tool=%s status=not_connected", server_name, tool_name)
             return f"Error: MCP Server {server_name} 未连接"
+        started = time.monotonic()
         future = asyncio.run_coroutine_threadsafe(
             session.call_tool(tool_name, args or {}), self._loop
         )
         try:
             result = future.result(_call_timeout())
         except Exception as e:
+            logger.error(
+                "call server=%s tool=%s status=failed elapsed=%.3fs error=%s",
+                server_name,
+                tool_name,
+                time.monotonic() - started,
+                describe_error(e),
+            )
             return f"Error: MCP 工具 {tool_name} 调用失败：{describe_error(e)}"
         try:
-            return format_tool_result(result)
+            output = format_tool_result(result)
         except Exception as e:
+            logger.error(
+                "call server=%s tool=%s status=parse_failed elapsed=%.3fs error=%s",
+                server_name,
+                tool_name,
+                time.monotonic() - started,
+                describe_error(e),
+            )
             return f"Error: MCP 工具 {tool_name} 的结果解析失败：{describe_error(e)}"
+        logger.info(
+            "call server=%s tool=%s status=%s elapsed=%.3fs chars=%d",
+            server_name,
+            tool_name,
+            "is_error" if result.isError else "ok",
+            time.monotonic() - started,
+            len(output),
+        )
+        return output
 
     def close(self):
         """尽力关闭全部连接（程序退出时调用，异常静默忽略）。"""
@@ -332,12 +361,14 @@ def _connect_server(manager, name, spec, taken, messages):
     if spec_error:
         messages.append(f"错误：{spec_error}")
         MCP_STATUS[name] = {"state": "error", "detail": spec_error, "tool_count": 0}
+        logger.error("connect server=%s status=invalid_config detail=%s", name, spec_error)
         return
     if _transport_of(spec) in HTTP_TYPES:
         reason = unreachable_reason(spec)
         if reason:
             messages.append(f"错误：MCP Server {name} {reason}")
             MCP_STATUS[name] = {"state": "error", "detail": reason, "tool_count": 0}
+            logger.error("connect server=%s status=unreachable detail=%s", name, reason)
             return
     try:
         tools = manager.connect(name, spec)
@@ -345,6 +376,7 @@ def _connect_server(manager, name, spec, taken, messages):
         detail = describe_error(e)
         messages.append(f"错误：MCP Server {name} 连接失败：{detail}")
         MCP_STATUS[name] = {"state": "error", "detail": detail, "tool_count": 0}
+        logger.error("connect server=%s status=failed detail=%s", name, detail)
         return
 
     registered = 0
@@ -377,6 +409,7 @@ def _connect_server(manager, name, spec, taken, messages):
         "detail": "",
         "tool_count": registered,
     }
+    logger.info("connect server=%s status=connected tools=%d", name, registered)
     messages.append(f"MCP Server {name} 已连接，注册 {registered} 个工具")
 
 
